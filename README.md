@@ -1,5 +1,31 @@
+
 # lasviewer
 
+Visualizador de arquivos LAS
+
+## Ambiente virtual
+
+# cria o ambiente virtual
+>python -m venv ./venv
+
+# ativa o ambiente virtual no windows
+Caso seja necessário, permite executar scripts locais (como o Activate.ps1)
+> Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+
+>.\venv\Scripts\Activate.ps1
+
+# ativa o ambiente virtual no linux / mac
+> source ./venv/bin/activate
+
+# instala o requisitos para ui
+> pip install --no-cache-dir -r requirements.txt
+> pip install -r requirements.txt
+
+# carrega/executa
+> python -m streamlit run app.py
+
+# desativa o ambiente virtual
+> deactivate
 
 
 ## Getting started
