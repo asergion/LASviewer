@@ -10,12 +10,14 @@ from src.analysis import (
     curves_with_valid_data,
     numeric_curve_stats,
 )
+
 from src.las_parser import (
     curves_metadata,
     extract_header_info,
     las_to_filtered_dataframe,
     read_las,
 )
+
 from src.plotting import (
     plot_compare_wells,
     plot_crossplot,
@@ -27,6 +29,7 @@ from src.plotting import (
 st.set_page_config(page_title="Leitor LAS", layout="wide")
 
 st.title("Leitor e Analisador de Arquivos LAS")
+
 
 uploaded_files = st.file_uploader(
     "Selecione um ou dois arquivos LAS",
@@ -43,21 +46,30 @@ if len(uploaded_files) > 2:
     st.stop()
 
 
-def load_uploaded_las(uploaded_file):
-    suffix = Path(uploaded_file.name).suffix or ".las"
+# -----------------------------
+# CACHE
+# -----------------------------
+@st.cache_data(show_spinner=True)
+def load_uploaded_las(file_bytes: bytes, file_name: str):
+    suffix = Path(file_name).suffix or ".las"
+
     with NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        tmp.write(uploaded_file.getvalue())
+        tmp.write(file_bytes)
         tmp_path = tmp.name
 
     las = read_las(tmp_path)
-    header = extract_header_info(las, uploaded_file.name)
+
+    header = extract_header_info(las, file_name)
+
     metadata_df = curves_metadata(las, tmp_path)
+
     df = las_to_filtered_dataframe(las, header.null_value)
+
     stats_df = numeric_curve_stats(df)
+
     valid_curves = curves_with_valid_data(stats_df)
 
     return {
-        "las": las,
         "header": header,
         "metadata_df": metadata_df,
         "df": df,
@@ -66,11 +78,18 @@ def load_uploaded_las(uploaded_file):
     }
 
 
-datasets = [load_uploaded_las(f) for f in uploaded_files]
+datasets = [
+    load_uploaded_las(f.getvalue(), f.name)
+    for f in uploaded_files
+]
+
 
 abas = st.tabs(["Resumo", "Curvas", "Gráficos", "Comparação"])
 
 
+# ==========================================================
+# RESUMO
+# ==========================================================
 with abas[0]:
     for i, item in enumerate(datasets, start=1):
         st.subheader(f"Arquivo {i}: {item['header'].file_name}")
@@ -96,36 +115,70 @@ with abas[0]:
         })
 
         st.write("**Curvas presentes**")
-        st.dataframe(item["metadata_df"], use_container_width=True)
+        st.dataframe(item["metadata_df"].head(200), width="stretch")
 
-        st.write("**Estatísticas das curvas (apenas com dados válidos)**")
+        st.write("**Estatísticas das curvas (somente válidas)**")
+        stats_filtrado = item["stats_df"][item["stats_df"]["valid_values"] > 0].copy()
 
-        stats_filtrado = item["stats_df"][item["stats_df"]["valid_values"] > 0]
+        # Ajustar índice para começar em 1
+        stats_filtrado.index = stats_filtrado.index + 1
 
         if stats_filtrado.empty:
-            st.warning("Nenhuma curva com valores válidos foi encontrada.")
+            st.warning("Nenhuma curva com dados válidos.")
         else:
-            st.dataframe(stats_filtrado, use_container_width=True)
+            st.dataframe(stats_filtrado.head(200), width="stretch")
 
         st.divider()
 
 
+# ==========================================================
+# CURVAS
+# ==========================================================
 with abas[1]:
     dataset_idx = st.selectbox(
         "Escolha o arquivo",
         options=range(len(datasets)),
         format_func=lambda x: datasets[x]["header"].file_name,
-        key="curvas_dataset",
     )
 
     item = datasets[dataset_idx]
-    st.write("**Curvas com valores válidos**")
+
+    st.write("**Curvas com dados válidos**")
+
+    stats_validas = item["stats_df"][item["stats_df"]["valid_values"] > 0].copy()
+
+    # Ajustar índice para começar em 1
+    stats_validas.index = stats_validas.index + 1
+
     st.dataframe(
-        item["stats_df"][item["stats_df"]["valid_values"] > 0],
-        use_container_width=True,
+        stats_validas.head(200),
+        width="stretch",
     )
 
+    st.write("**Unidades e descrições das curvas válidas**")
 
+    curvas_validas = stats_validas["curve"].tolist()
+
+    metadata_validas = item["metadata_df"][
+        item["metadata_df"]["mnemonic"].isin(curvas_validas)
+    ].copy()
+
+    metadata_validas = metadata_validas.rename(
+        columns={
+            "mnemonic": "curve",
+            "unit": "unit",
+            "description": "description",
+        }
+    )
+
+    st.dataframe(
+        metadata_validas.head(200),
+        width="stretch",
+    )
+
+# ==========================================================
+# GRÁFICOS
+# ==========================================================
 with abas[2]:
     dataset_idx = st.selectbox(
         "Arquivo para análise gráfica",
@@ -137,54 +190,127 @@ with abas[2]:
     item = datasets[dataset_idx]
 
     if not item["valid_curves"]:
-        st.warning("Esse arquivo não possui curvas numéricas válidas para plot.")
+        st.warning("Nenhuma curva válida para plot.")
     else:
-        curve = st.selectbox("Selecione a curva", item["valid_curves"])
+        st.markdown("### Configuração dos eixos")
 
-        # Buscar descrição da curva
+        axis_options = ["__INDEX__"] + item["valid_curves"]
+
+        primeira_curva = item["valid_curves"][0]
+
+        if item["header"].index_type == "tempo":
+            default_x = "__INDEX__"
+            default_y = primeira_curva
+        elif item["header"].index_type == "profundidade":
+            default_x = primeira_curva
+            default_y = "__INDEX__"
+        else:
+            default_x = "__INDEX__"
+            default_y = primeira_curva
+
+        def format_axis_label(value):
+            if value == "__INDEX__":
+                if item["header"].index_type == "tempo":
+                    return "Tempo"
+                elif item["header"].index_type == "profundidade":
+                    return "Profundidade"
+                return "Índice"
+            return value
+
+        col_x, col_y = st.columns(2)
+
+        x_column = col_x.selectbox(
+            "Eixo X",
+            axis_options,
+            index=axis_options.index(default_x),
+            format_func=format_axis_label,
+        )
+
+        y_column = col_y.selectbox(
+            "Eixo Y",
+            axis_options,
+            index=axis_options.index(default_y),
+            format_func=format_axis_label,
+        )
+
+        # -----------------------------
+        # DESCRIÇÃO DAS CURVAS ESCOLHIDAS
+        # -----------------------------
         metadata_df = item["metadata_df"]
 
-        curve_info = metadata_df[metadata_df["mnemonic"] == curve]
+        selected_curves = [
+            col for col in [x_column, y_column]
+            if col != "__INDEX__"
+        ]
 
-        if not curve_info.empty:
-            description = curve_info.iloc[0]["description"]
-            unit = curve_info.iloc[0]["unit"]
+        for selected_curve in selected_curves:
+            curve_info = metadata_df[metadata_df["mnemonic"] == selected_curve]
 
-            st.markdown(f"**Descrição:** {description or '-'}")
-            st.markdown(f"**Unidade:** {unit or '-'}")
+            if not curve_info.empty:
+                description = curve_info.iloc[0]["description"]
+                unit = curve_info.iloc[0]["unit"]
+
+                st.markdown(
+                    f"**{selected_curve}** — "
+                    f"Descrição: {description or '-'} | "
+                    f"Unidade: {unit or '-'}"
+                )
+
+        if x_column == y_column:
+            st.warning("Escolha variáveis diferentes para X e Y.")
         else:
-            st.markdown("**Descrição:** -")
-            st.markdown("**Unidade:** -")
+            fig = plot_single_curve(
+                item["df"],
+                x_column,
+                y_column,
+                title=f"{format_axis_label(x_column)} x {format_axis_label(y_column)} - {item['header'].file_name}",
+                index_type=item["header"].index_type,
+            )
 
-        fig = plot_single_curve(item["df"], curve, item["header"].index_type)
-        st.plotly_chart(fig, width="stretch")
+            st.plotly_chart(fig, width="stretch")
 
-        st.write("**Histograma**")
-        hist_fig = plot_histogram(item["df"], curve)
-        st.plotly_chart(hist_fig, width="stretch")
+        # -----------------------------
+        # HISTOGRAMA
+        # -----------------------------
+        curva_histograma = y_column if y_column != "__INDEX__" else x_column
 
+        if curva_histograma != "__INDEX__":
+            st.write("**Histograma**")
+            hist_fig = plot_histogram(item["df"], curva_histograma)
+            st.plotly_chart(hist_fig, width="stretch")
+
+        # -----------------------------
+        # CROSSPLOT
+        # -----------------------------
         st.write("**Crossplot**")
-        curve_x = st.selectbox("Curva X", item["valid_curves"], key="curve_x")
-        curve_y = st.selectbox("Curva Y", item["valid_curves"], key="curve_y")
+
+        curve_x = st.selectbox("Curva X", item["valid_curves"], key="cx")
+        curve_y = st.selectbox("Curva Y", item["valid_curves"], key="cy")
+
         if curve_x != curve_y:
             cross_fig = plot_crossplot(item["df"], curve_x, curve_y)
             st.plotly_chart(cross_fig, width="stretch")
         else:
-            st.info("Selecione curvas diferentes para o crossplot.")
+            st.info("Escolha curvas diferentes.")
 
-
+# ==========================================================
+# COMPARAÇÃO ENTRE POÇOS
+# ==========================================================
 with abas[3]:
     if len(datasets) < 2:
-        st.info("Envie dois arquivos para habilitar a comparação entre poços.")
+        st.info("Envie dois arquivos para comparação.")
     else:
         common_curves = sorted(
-            set(datasets[0]["valid_curves"]).intersection(set(datasets[1]["valid_curves"]))
+            set(datasets[0]["valid_curves"]).intersection(
+                set(datasets[1]["valid_curves"])
+            )
         )
 
         if not common_curves:
-            st.warning("Não há curvas válidas em comum entre os dois arquivos.")
+            st.warning("Nenhuma curva comum.")
         else:
-            curve_name = st.selectbox("Curva para comparar", common_curves)
+            curve_name = st.selectbox("Curva", common_curves)
+
             compare_df = compare_curves_between_wells(
                 datasets[0]["df"],
                 datasets[1]["df"],
@@ -192,8 +318,9 @@ with abas[3]:
             )
 
             if compare_df.empty:
-                st.warning("Não foi possível alinhar os índices das duas curvas.")
+                st.warning("Não foi possível alinhar índices.")
             else:
-                st.dataframe(compare_df.head(200), use_container_width=True)
+                st.dataframe(compare_df.head(200), width="stretch")
+
                 fig = plot_compare_wells(compare_df, curve_name)
                 st.plotly_chart(fig, width="stretch")

@@ -5,23 +5,29 @@ import plotly.express as px
 import plotly.graph_objects as go
 
 
-def plot_single_curve(df: pd.DataFrame, curve_name: str, index_type: str):
+def plot_single_curve(
+    df: pd.DataFrame,
+    x_column: str,
+    y_column: str,
+    title: str,
+    index_type: str,
+):
     chart_df = pd.DataFrame({
-        "index": pd.to_numeric(df["__INDEX__"], errors="coerce"),
-        "value": pd.to_numeric(df[curve_name], errors="coerce"),
+        x_column: pd.to_numeric(df[x_column], errors="coerce"),
+        y_column: pd.to_numeric(df[y_column], errors="coerce"),
     }).dropna()
-
-    y_label = "Tempo" if index_type == "tempo" else "Profundidade/Índice"
 
     fig = px.line(
         chart_df,
-        x="value",
-        y="index",
-        title=f"Curva {curve_name}",
-        labels={"value": curve_name, "index": y_label},
+        x=x_column,
+        y=y_column,
+        title=title,
+        labels={
+            "__INDEX__": "Tempo" if index_type == "tempo" else "Profundidade/Índice",
+        },
     )
 
-    if index_type == "profundidade":
+    if y_column == "__INDEX__" and index_type == "profundidade":
         fig.update_yaxes(autorange="reversed")
 
     return fig
