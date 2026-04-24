@@ -1,8 +1,88 @@
 from __future__ import annotations
-
+from plotly.subplots import make_subplots
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+
+def plot_curves_side_by_side(
+    df: pd.DataFrame,
+    fixed_axis: str,
+    fixed_variable: str,
+    selected_variables: list[str],
+    title: str,
+    index_type: str,
+    label_formatter,
+):
+    if not selected_variables:
+        return None
+
+    max_cols = 10
+    total_plots = len(selected_variables)
+    total_rows = (total_plots + max_cols - 1) // max_cols
+    total_cols = min(max_cols, total_plots)
+
+    subplot_titles = [label_formatter(v) for v in selected_variables]
+
+    fig = make_subplots(
+        rows=total_rows,
+        cols=total_cols,
+        shared_yaxes=fixed_axis == "Eixo Y",
+        shared_xaxes=fixed_axis == "Eixo X",
+        subplot_titles=subplot_titles,
+        horizontal_spacing=0.025,
+        vertical_spacing=0.08,
+    )
+
+    for idx, variable in enumerate(selected_variables):
+        row = (idx // max_cols) + 1
+        col = (idx % max_cols) + 1
+
+        if fixed_axis == "Eixo Y":
+            x_column = variable
+            y_column = fixed_variable
+        else:
+            x_column = fixed_variable
+            y_column = variable
+
+        chart_df = pd.DataFrame({
+            x_column: pd.to_numeric(df[x_column], errors="coerce"),
+            y_column: pd.to_numeric(df[y_column], errors="coerce"),
+        }).dropna()
+
+        fig.add_trace(
+            go.Scatter(
+                x=chart_df[x_column],
+                y=chart_df[y_column],
+                mode="lines",
+                name=label_formatter(variable),
+                showlegend=False,
+            ),
+            row=row,
+            col=col,
+        )
+
+        fig.update_xaxes(
+            title_text=label_formatter(x_column),
+            row=row,
+            col=col,
+        )
+
+        if col == 1:
+            fig.update_yaxes(
+                title_text=label_formatter(y_column),
+                row=row,
+                col=col,
+            )
+
+    if fixed_axis == "Eixo Y" and fixed_variable == "__INDEX__" and index_type == "profundidade":
+        fig.update_yaxes(autorange="reversed")
+
+    fig.update_layout(
+        title=title,
+        height=max(650, total_rows * 520),
+    )
+
+    return fig
 
 
 def plot_single_curve(
