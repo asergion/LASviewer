@@ -4,6 +4,8 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 
 import streamlit as st
+import pandas as pd
+import numpy as np
 
 from src.analysis import (
     compare_curves_between_wells,
@@ -29,6 +31,7 @@ from src.plotting import (
 st.set_page_config(page_title="Leitor LAS", layout="wide")
 st.title("Leitor e Analisador de Arquivos LAS")
 
+
 def preview_las_file(file_path: str, extra_lines_after_ascii: int = 5) -> str:
     preview_lines = []
     found_ascii = False
@@ -53,6 +56,45 @@ def preview_las_file(file_path: str, extra_lines_after_ascii: int = 5) -> str:
     return "\n".join(preview_lines)
 
 
+def detect_unix_time_unit(series: pd.Series) -> str | None:
+    valores = pd.to_numeric(series, errors="coerce").dropna()
+
+    if valores.empty:
+        return None
+
+    mediana = float(valores.median())
+
+    if mediana > 1e15:
+        return "ns"
+    if mediana > 1e12:
+        return "ms"
+    if mediana > 1e9:
+        return "s"
+
+    return None
+
+
+def normalize_time_index(df: pd.DataFrame, index_type: str) -> tuple[pd.DataFrame, str | None]:
+    if index_type != "tempo":
+        return df, None
+
+    time_unit = detect_unix_time_unit(df["__INDEX__"])
+
+    if time_unit is None:
+        return df, None
+
+    df = df.copy()
+
+    df["__INDEX_DATETIME__"] = pd.to_datetime(
+        pd.to_numeric(df["__INDEX__"], errors="coerce"),
+        unit=time_unit,
+        errors="coerce",
+        utc=True,
+    )
+
+    return df, time_unit
+
+
 @st.cache_data(show_spinner=True)
 def load_uploaded_las(file_bytes: bytes, file_name: str):
     suffix = Path(file_name).suffix or ".las"
@@ -67,8 +109,27 @@ def load_uploaded_las(file_bytes: bytes, file_name: str):
     header = extract_header_info(las, file_name)
     metadata_df = curves_metadata(las, tmp_path)
     df = las_to_filtered_dataframe(las, header.null_value)
+    df, time_unit = normalize_time_index(df, header.index_type)
+
     stats_df = numeric_curve_stats(df)
     valid_curves = curves_with_valid_data(stats_df)
+
+    # Calcular limites do índice
+    index_series = pd.to_numeric(df["__INDEX__"], errors="coerce").dropna()
+
+    index_min = float(index_series.min()) if not index_series.empty else None
+    index_max = float(index_series.max()) if not index_series.empty else None
+
+    # Calcular limites de profundidade (MD), se existir
+    md_min = None
+    md_max = None
+
+    if "MD" in df.columns:
+        md_series = pd.to_numeric(df["MD"], errors="coerce").dropna()
+
+        if not md_series.empty:
+            md_min = float(md_series.min())
+            md_max = float(md_series.max())
 
     return {
         "header": header,
@@ -77,7 +138,13 @@ def load_uploaded_las(file_bytes: bytes, file_name: str):
         "stats_df": stats_df,
         "valid_curves": valid_curves,
         "preview_text": preview_text,
+        "index_min": index_min,
+        "index_max": index_max,
+        "md_min": md_min,
+        "md_max": md_max,
+        "time_unit": time_unit,
     }
+
 
 # SIDEBAR CONFIGURACOES
 with st.sidebar:
@@ -115,15 +182,30 @@ with st.sidebar:
 
     st.markdown("### Configuração dos eixos")
 
-    axis_options_global = ["__INDEX__"] + item_global["valid_curves"]
+    if (
+        item_global["header"].index_type == "tempo"
+        and "__INDEX_DATETIME__" in item_global["df"].columns
+    ):
+        axis_options_global = ["__INDEX_DATETIME__"] + item_global["valid_curves"]
+        variavel_fixa_default = "__INDEX_DATETIME__"
+    else:
+        axis_options_global = ["__INDEX__"] + item_global["valid_curves"]
+        variavel_fixa_default = "__INDEX__"
 
     def format_axis_label_global(value):
+        if value == "__INDEX_DATETIME__":
+            return "Tempo"
+
         if value == "__INDEX__":
             if item_global["header"].index_type == "tempo":
-                return "Tempo (s)"
+                unidade = item_global.get("time_unit") or item_global["header"].index_unit or "s"
+                return f"Tempo ({unidade})"
+
             if item_global["header"].index_type == "profundidade":
                 return f"Profundidade ({item_global['header'].index_unit or 'm'})"
+
             return "Índice"
+
         # Buscar unidade no metadata
         curve_info = item_global["metadata_df"][
             item_global["metadata_df"]["mnemonic"] == value
@@ -141,8 +223,6 @@ with st.sidebar:
         ["Eixo X", "Eixo Y"],
         index=1 if item_global["header"].index_type == "profundidade" else 0,
     )
-
-    variavel_fixa_default = "__INDEX__"
 
     variavel_fixa = st.selectbox(
         "Variável fixa",
@@ -173,7 +253,6 @@ with st.sidebar:
         if checkbox_key not in st.session_state:
             st.session_state[checkbox_key] = variavel in st.session_state[estado_key]
 
-
     def selecionar_todas_variaveis():
         st.session_state[estado_key] = variaveis_disponiveis
 
@@ -181,14 +260,12 @@ with st.sidebar:
             checkbox_key = f"{checkbox_prefix}_{variavel}"
             st.session_state[checkbox_key] = True
 
-
     def limpar_variaveis():
         st.session_state[estado_key] = []
 
         for variavel in variaveis_disponiveis:
             checkbox_key = f"{checkbox_prefix}_{variavel}"
             st.session_state[checkbox_key] = False
-
 
     col_sel1, col_sel2 = st.columns(2)
 
@@ -225,6 +302,7 @@ with st.sidebar:
 
 abas = st.tabs(["Resumo", "Gráficos", "Comparação"])
 
+
 # RESUMO
 # Exibe os metadados principais de cada arquivo LAS, a pré-visualização textual
 # do arquivo e as primeiras tabelas de curvas/metadados.
@@ -244,6 +322,47 @@ with abas[0]:
             col4.metric("Tipo de indexação", item["header"].index_type)
             col5.metric("Curva índice", item["header"].index_curve or "-")
             col6.metric("Total de registros", item["header"].total_records)
+
+            col7, col8 = st.columns(2)
+
+            if item["header"].index_type == "tempo":
+                if "__INDEX_DATETIME__" in item["df"].columns:
+                    tempo_min = item["df"]["__INDEX_DATETIME__"].min()
+                    tempo_max = item["df"]["__INDEX_DATETIME__"].max()
+
+                    col7.metric(
+                        "Tempo mínimo",
+                        tempo_min.strftime("%d/%m/%Y %H:%M:%S") if pd.notna(tempo_min) else "-",
+                    )
+                    col8.metric(
+                        "Tempo máximo",
+                        tempo_max.strftime("%d/%m/%Y %H:%M:%S") if pd.notna(tempo_max) else "-",
+                    )
+                else:
+                    col7.metric(
+                        "Tempo mínimo",
+                        f"{item['index_min']:.2f}" if item["index_min"] is not None else "-",
+                    )
+                    col8.metric(
+                        "Tempo máximo",
+                        f"{item['index_max']:.2f}" if item["index_max"] is not None else "-",
+                    )
+
+            elif item["header"].index_type == "profundidade":
+                col7.metric(
+                    "Profundidade mínima",
+                    f"{item['index_min']:.2f}" if item["index_min"] is not None else "-",
+                )
+                col8.metric(
+                    "Profundidade máxima",
+                    f"{item['index_max']:.2f}" if item["index_max"] is not None else "-",
+                )
+
+            # Sempre mostrar MD também se existir
+            if item["md_min"] is not None:
+                col9, col10 = st.columns(2)
+                col9.metric("MD mínimo (m)", f"{item['md_min']:.2f}")
+                col10.metric("MD máximo (m)", f"{item['md_max']:.2f}")
 
             # st.write("**Cabeçalho principal**")
             # st.json({
@@ -293,6 +412,7 @@ with abas[0]:
 
         st.divider()
 
+
 # GRAFICOS
 # Usa a configuração da sidebar para montar gráficos lado a lado.
 # O eixo fixo pode ser Tempo/Profundidade ou qualquer curva escolhida.
@@ -323,7 +443,7 @@ with abas[1]:
             col_desc_1, col_desc_2 = st.columns(2)
 
             for idx_curva, selected_curve in enumerate(grupo_curvas):
-                if selected_curve == "__INDEX__":
+                if selected_curve in ["__INDEX__", "__INDEX_DATETIME__"]:
                     continue
 
                 curve_info = metadata_df[metadata_df["mnemonic"] == selected_curve]
@@ -373,6 +493,7 @@ with abas[1]:
             st.plotly_chart(cross_fig, width="stretch")
         else:
             st.info("Escolha curvas diferentes.")
+
 
 # COMPARACAO ENTRE POCOS
 # Quando dois arquivos são carregados, compara curvas em comum entre eles.

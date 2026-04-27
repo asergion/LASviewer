@@ -45,8 +45,8 @@ def plot_curves_side_by_side(
             y_column = variable
 
         chart_df = pd.DataFrame({
-            x_column: pd.to_numeric(df[x_column], errors="coerce"),
-            y_column: pd.to_numeric(df[y_column], errors="coerce"),
+            x_column: df[x_column] if x_column == "__INDEX_DATETIME__" else pd.to_numeric(df[x_column], errors="coerce"),
+            y_column: df[y_column] if y_column == "__INDEX_DATETIME__" else pd.to_numeric(df[y_column], errors="coerce"),
         }).dropna()
 
         fig.add_trace(
@@ -82,6 +82,13 @@ def plot_curves_side_by_side(
         height=max(650, total_rows * 520),
     )
 
+    # Se estiver usando datetime, ajustar eixo como data
+    if any(v == "__INDEX_DATETIME__" for v in [fixed_variable] + selected_variables):
+        fig.update_xaxes(
+            type="date",
+            tickformat="%d/%m/%Y<br>%H:%M:%S",
+        )
+        
     return fig
 
 

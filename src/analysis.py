@@ -7,7 +7,7 @@ def numeric_curve_stats(df: pd.DataFrame) -> pd.DataFrame:
     rows = []
 
     for column in df.columns:
-        if column == "__INDEX__":
+        if column in ["__INDEX__", "__INDEX_DATETIME__"]:
             continue
 
         series = pd.to_numeric(df[column], errors="coerce")
@@ -30,7 +30,6 @@ def numeric_curve_stats(df: pd.DataFrame) -> pd.DataFrame:
         )
 
     return pd.DataFrame(rows).sort_values(by="curve").reset_index(drop=True)
-
 
 def curves_with_valid_data(stats_df: pd.DataFrame) -> list[str]:
     if stats_df.empty:
