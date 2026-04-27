@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
@@ -26,6 +27,13 @@ from src.plotting import (
     plot_histogram,
     plot_curves_side_by_side,
 )
+
+from src.parquet_store import (
+    read_selected_curves,
+    downsample_df,
+)
+
+from src.las_indexer import index_las_file
 
 
 st.set_page_config(page_title="Leitor LAS", layout="wide")
@@ -95,6 +103,19 @@ def normalize_time_index(df: pd.DataFrame, index_type: str) -> tuple[pd.DataFram
     return df, time_unit
 
 
+def get_header_value(item: dict, key: str):
+    header = item["header"]
+
+    if isinstance(header, dict):
+        return header.get(key)
+
+    return getattr(header, key, None)
+
+
+def is_indexed_mode(item: dict) -> bool:
+    return item.get("modo_indexado", False)
+
+
 @st.cache_data(show_spinner=True)
 def load_uploaded_las(file_bytes: bytes, file_name: str):
     suffix = Path(file_name).suffix or ".las"
@@ -114,13 +135,11 @@ def load_uploaded_las(file_bytes: bytes, file_name: str):
     stats_df = numeric_curve_stats(df)
     valid_curves = curves_with_valid_data(stats_df)
 
-    # Calcular limites do índice
     index_series = pd.to_numeric(df["__INDEX__"], errors="coerce").dropna()
 
     index_min = float(index_series.min()) if not index_series.empty else None
     index_max = float(index_series.max()) if not index_series.empty else None
 
-    # Calcular limites de profundidade (MD), se existir
     md_min = None
     md_max = None
 
@@ -143,38 +162,175 @@ def load_uploaded_las(file_bytes: bytes, file_name: str):
         "md_min": md_min,
         "md_max": md_max,
         "time_unit": time_unit,
+        "modo_indexado": False,
     }
+
+
+@st.dialog("Indexar arquivo LAS", width="large")
+def abrir_dialogo_indexacao():
+    st.write(
+        "Use esta opção para converter um arquivo LAS em arquivos otimizados "
+        "`Parquet` e `metadata.json`."
+    )
+
+    st.info(
+        "Para arquivos LAS grandes, informe o caminho local do arquivo. "
+        "O arquivo LAS original não será movido. O `.parquet` e o `.metadata.json` "
+        "serão salvos na mesma pasta do LAS."
+    )
+
+    st.markdown("**Arquivo LAS de origem**")
+
+    las_path_input = st.text_input(
+        "Cole aqui o caminho completo do arquivo LAS",
+        value="",
+        placeholder=r"D:\dados\poco_01.las",
+        help="No Windows, clique com o botão direito no arquivo LAS, escolha 'Copiar como caminho' e cole aqui.",
+    )
+
+    if las_path_input:
+        las_path_input = las_path_input.strip().strip('"')
+
+    las_path: Path | None = None
+    output_dir_final: Path | None = None
+
+    if las_path_input:
+        las_path = Path(las_path_input)
+
+        if not las_path.exists():
+            st.error(f"Arquivo não encontrado: {las_path}")
+            las_path = None
+        elif not las_path.is_file():
+            st.error(f"O caminho informado não é um arquivo: {las_path}")
+            las_path = None
+        else:
+            output_dir_final = las_path.parent
+            st.write("**Arquivo LAS selecionado:**")
+            st.code(str(las_path))
+            st.write("**Pasta de saída da indexação:**")
+            st.code(str(output_dir_final))
+    else:
+        st.info("Informe o caminho completo do arquivo LAS.")
+
+    # =========================
+    # EXECUÇÃO DA INDEXAÇÃO
+    # =========================
+    if st.button("Indexar LAS", disabled=las_path is None):
+        with st.spinner("Indexando arquivo LAS..."):
+            metadata = index_las_file(
+                las_path=las_path,
+                output_dir=output_dir_final,
+            )
+
+        metadata_path = output_dir_final / f"{las_path.stem}.metadata.json"
+
+        st.success("Indexação concluída.")
+
+        st.write("**Arquivo Parquet gerado:**")
+        st.code(metadata["parquet_file"])
+
+        st.write("**Arquivo de metadados gerado:**")
+        st.code(str(metadata_path))
+
+        st.write("**Total de registros:**")
+        st.metric("Registros", metadata["total_records"])
+
+        st.write("**Curvas válidas encontradas:**")
+        st.dataframe(
+            pd.DataFrame({"curves": metadata["valid_curves"]}),
+            width="stretch",
+        )
+
+        st.info(
+            "Para visualizar, feche este modal, escolha o modo "
+            "'Visualizar LAS indexado' e selecione o arquivo `.metadata.json` gerado."
+        )
 
 
 # SIDEBAR CONFIGURACOES
 with st.sidebar:
     st.header("Configurações")
 
-    uploaded_files = st.file_uploader(
-        "Selecione um ou dois arquivos LAS",
-        type=["las"],
-        accept_multiple_files=True,
+    if st.button("Indexar arquivo LAS", type="secondary"):
+        abrir_dialogo_indexacao()
+
+    st.divider()
+
+    modo_leitura = st.radio(
+        "Modo de visualização",
+        [
+            "Ler LAS diretamente",
+            "Visualizar LAS indexado",
+        ],
     )
 
-if not uploaded_files:
-    st.info("Envie pelo menos um arquivo LAS para começar.")
-    st.stop()
+    datasets = []
 
-if len(uploaded_files) > 2:
-    st.warning("Por enquanto, envie no máximo dois arquivos.")
-    st.stop()
+    if modo_leitura == "Ler LAS diretamente":
+        uploaded_files = st.file_uploader(
+            "Selecione um ou dois arquivos LAS",
+            type=["las"],
+            accept_multiple_files=True,
+        )
 
+        if not uploaded_files:
+            st.info("Envie pelo menos um arquivo LAS para começar.")
+            st.stop()
 
-datasets = [
-    load_uploaded_las(f.getvalue(), f.name)
-    for f in uploaded_files
-]
+        if len(uploaded_files) > 2:
+            st.warning("Por enquanto, envie no máximo dois arquivos.")
+            st.stop()
+
+        datasets = [
+            load_uploaded_las(f.getvalue(), f.name)
+            for f in uploaded_files
+        ]
+
+    else:
+        uploaded_metadata_files = st.file_uploader(
+            "Selecione um ou dois arquivos .metadata.json",
+            type=["json"],
+            accept_multiple_files=True,
+        )
+
+        if not uploaded_metadata_files:
+            st.info("Envie pelo menos um arquivo .metadata.json indexado.")
+            st.stop()
+
+        if len(uploaded_metadata_files) > 2:
+            st.warning("Por enquanto, envie no máximo dois arquivos indexados.")
+            st.stop()
+
+        for metadata_file in uploaded_metadata_files:
+            metadata = json.loads(metadata_file.getvalue().decode("utf-8"))
+
+            metadata_df = pd.DataFrame(metadata["curves_metadata"])
+            stats_df = pd.DataFrame(metadata["stats"])
+
+            datasets.append(
+                {
+                    "header": metadata["header"],
+                    "metadata_df": metadata_df,
+                    "stats_df": stats_df,
+                    "valid_curves": metadata["valid_curves"],
+                    "preview_text": f"Arquivo indexado: {metadata.get('source_file', '-')}",
+                    "parquet_file": metadata["parquet_file"],
+                    "time_unit": metadata.get("time_unit"),
+                    "index_min": metadata.get("index_min"),
+                    "index_max": metadata.get("index_max"),
+                    "md_min": metadata.get("md_min"),
+                    "md_max": metadata.get("md_max"),
+                    "columns": metadata.get("columns", []),
+                    "modo_indexado": True,
+                }
+            )
+
 
 with st.sidebar:
     dataset_idx_global = st.selectbox(
         "Arquivo para análise gráfica",
         options=range(len(datasets)),
-        format_func=lambda x: datasets[x]["header"].file_name,
+        format_func=lambda x: get_header_value(datasets[x], "file_name") or f"Arquivo {x + 1}",
         key="sidebar_dataset",
     )
 
@@ -182,9 +338,21 @@ with st.sidebar:
 
     st.markdown("### Configuração dos eixos")
 
+    index_type_global = get_header_value(item_global, "index_type")
+    columns_global = item_global.get("columns", [])
+
     if (
-        item_global["header"].index_type == "tempo"
-        and "__INDEX_DATETIME__" in item_global["df"].columns
+        index_type_global == "tempo"
+        and (
+            (
+                not is_indexed_mode(item_global)
+                and "__INDEX_DATETIME__" in item_global["df"].columns
+            )
+            or (
+                is_indexed_mode(item_global)
+                and "__INDEX_DATETIME__" in columns_global
+            )
+        )
     ):
         axis_options_global = ["__INDEX_DATETIME__"] + item_global["valid_curves"]
         variavel_fixa_default = "__INDEX_DATETIME__"
@@ -193,20 +361,22 @@ with st.sidebar:
         variavel_fixa_default = "__INDEX__"
 
     def format_axis_label_global(value):
+        index_type = get_header_value(item_global, "index_type")
+        index_unit = get_header_value(item_global, "index_unit")
+
         if value == "__INDEX_DATETIME__":
             return "Tempo"
 
         if value == "__INDEX__":
-            if item_global["header"].index_type == "tempo":
-                unidade = item_global.get("time_unit") or item_global["header"].index_unit or "s"
+            if index_type == "tempo":
+                unidade = item_global.get("time_unit") or index_unit or "s"
                 return f"Tempo ({unidade})"
 
-            if item_global["header"].index_type == "profundidade":
-                return f"Profundidade ({item_global['header'].index_unit or 'm'})"
+            if index_type == "profundidade":
+                return f"Profundidade ({index_unit or 'm'})"
 
             return "Índice"
 
-        # Buscar unidade no metadata
         curve_info = item_global["metadata_df"][
             item_global["metadata_df"]["mnemonic"] == value
         ]
@@ -221,7 +391,7 @@ with st.sidebar:
     eixo_fixo = st.radio(
         "Eixo fixo",
         ["Eixo X", "Eixo Y"],
-        index=1 if item_global["header"].index_type == "profundidade" else 0,
+        index=1 if index_type_global == "profundidade" else 0,
     )
 
     variavel_fixa = st.selectbox(
@@ -311,68 +481,93 @@ with abas[0]:
         col_resumo, col_preview = st.columns([0.62, 0.38])
 
         with col_resumo:
-            st.subheader(f"Arquivo {i}: {item['header'].file_name}")
+            st.subheader(f"Arquivo {i}: {get_header_value(item, 'file_name')}")
 
             col1, col2, col3 = st.columns(3)
-            col1.metric("Versão LAS", item["header"].las_version or "-")
-            col2.metric("Companhia", item["header"].company or "-")
-            col3.metric("Poço", item["header"].well_name or "-")
+            col1.metric("Versão LAS", get_header_value(item, "las_version") or "-")
+            col2.metric("Companhia", get_header_value(item, "company") or "-")
+            col3.metric("Poço", get_header_value(item, "well_name") or "-")
 
             col4, col5, col6 = st.columns(3)
-            col4.metric("Tipo de indexação", item["header"].index_type)
-            col5.metric("Curva índice", item["header"].index_curve or "-")
-            col6.metric("Total de registros", item["header"].total_records)
+            col4.metric("Tipo de indexação", get_header_value(item, "index_type") or "-")
+            col5.metric("Curva índice", get_header_value(item, "index_curve") or "-")
+            col6.metric("Total de registros", get_header_value(item, "total_records") or "-")
 
             col7, col8 = st.columns(2)
 
-            if item["header"].index_type == "tempo":
-                if "__INDEX_DATETIME__" in item["df"].columns:
+            if get_header_value(item, "index_type") == "tempo":
+                tempo_min_formatado = "-"
+                tempo_max_formatado = "-"
+
+                if not is_indexed_mode(item) and "__INDEX_DATETIME__" in item["df"].columns:
                     tempo_min = item["df"]["__INDEX_DATETIME__"].min()
                     tempo_max = item["df"]["__INDEX_DATETIME__"].max()
 
-                    col7.metric(
-                        "Tempo mínimo",
-                        tempo_min.strftime("%d/%m/%Y %H:%M:%S") if pd.notna(tempo_min) else "-",
-                    )
-                    col8.metric(
-                        "Tempo máximo",
-                        tempo_max.strftime("%d/%m/%Y %H:%M:%S") if pd.notna(tempo_max) else "-",
-                    )
-                else:
-                    col7.metric(
-                        "Tempo mínimo",
-                        f"{item['index_min']:.2f}" if item["index_min"] is not None else "-",
-                    )
-                    col8.metric(
-                        "Tempo máximo",
-                        f"{item['index_max']:.2f}" if item["index_max"] is not None else "-",
+                    tempo_min_formatado = (
+                        tempo_min.strftime("%d/%m/%Y %H:%M:%S")
+                        if pd.notna(tempo_min)
+                        else "-"
                     )
 
-            elif item["header"].index_type == "profundidade":
+                    tempo_max_formatado = (
+                        tempo_max.strftime("%d/%m/%Y %H:%M:%S")
+                        if pd.notna(tempo_max)
+                        else "-"
+                    )
+
+                elif is_indexed_mode(item):
+                    tempo_min = item.get("tempo_min")
+                    tempo_max = item.get("tempo_max")
+
+                    if tempo_min and tempo_max:
+                        tempo_min_formatado = pd.to_datetime(tempo_min).strftime("%d/%m/%Y %H:%M:%S")
+                        tempo_max_formatado = pd.to_datetime(tempo_max).strftime("%d/%m/%Y %H:%M:%S")
+
+                    elif item.get("index_min") is not None and item.get("index_max") is not None:
+                        unidade = item.get("time_unit") or "s"
+
+                        tempo_min_formatado = pd.to_datetime(
+                            item["index_min"],
+                            unit=unidade,
+                            utc=True,
+                        ).strftime("%d/%m/%Y %H:%M:%S")
+
+                        tempo_max_formatado = pd.to_datetime(
+                            item["index_max"],
+                            unit=unidade,
+                            utc=True,
+                        ).strftime("%d/%m/%Y %H:%M:%S")
+
+                col7.metric("Tempo mínimo", tempo_min_formatado)
+                col8.metric("Tempo máximo", tempo_max_formatado)
+
+            elif get_header_value(item, "index_type") == "profundidade":
+                profundidade_min = item.get("index_min")
+                profundidade_max = item.get("index_max")
+
+                if profundidade_min is None or profundidade_max is None:
+                    stats_df = item.get("stats_df")
+
+                    if stats_df is not None and not stats_df.empty:
+                        md_stats = stats_df[stats_df["curve"] == "MD"]
+
+                        if not md_stats.empty:
+                            profundidade_min = float(md_stats.iloc[0]["min"])
+                            profundidade_max = float(md_stats.iloc[0]["max"])
+
                 col7.metric(
                     "Profundidade mínima",
-                    f"{item['index_min']:.2f}" if item["index_min"] is not None else "-",
+                    f"{profundidade_min:.2f}" if profundidade_min is not None else "-",
                 )
                 col8.metric(
                     "Profundidade máxima",
-                    f"{item['index_max']:.2f}" if item["index_max"] is not None else "-",
+                    f"{profundidade_max:.2f}" if profundidade_max is not None else "-",
                 )
 
-            # Sempre mostrar MD também se existir
-            if item["md_min"] is not None:
+            if item.get("md_min") is not None:
                 col9, col10 = st.columns(2)
                 col9.metric("MD mínimo (m)", f"{item['md_min']:.2f}")
                 col10.metric("MD máximo (m)", f"{item['md_max']:.2f}")
-
-            # st.write("**Cabeçalho principal**")
-            # st.json({
-            #     "field_name": item["header"].field_name,
-            #     "null_value": item["header"].null_value,
-            #     "start": item["header"].start,
-            #     "stop": item["header"].stop,
-            #     "step": item["header"].step,
-            #     "index_unit": item["header"].index_unit,
-            # })
 
             st.write("**Curvas presentes**")
             st.dataframe(item["metadata_df"].head(200), width="stretch")
@@ -424,6 +619,17 @@ with abas[1]:
     elif not variaveis_multiplas:
         st.warning("Selecione pelo menos uma variável no painel lateral.")
     else:
+        if is_indexed_mode(item):
+            df_plot = read_selected_curves(
+                parquet_path=item["parquet_file"],
+                fixed_variable=variavel_fixa,
+                selected_variables=variaveis_multiplas,
+            )
+
+            df_plot = downsample_df(df_plot, max_points=10_000)
+        else:
+            df_plot = item["df"]
+
         metadata_df = item["metadata_df"]
 
         tamanho_grupo = 10
@@ -469,12 +675,12 @@ with abas[1]:
                     col_desc_2.markdown(texto_curva)
 
             fig = plot_curves_side_by_side(
-                df=item["df"],
+                df=df_plot,
                 fixed_axis=eixo_fixo,
                 fixed_variable=variavel_fixa,
                 selected_variables=grupo_curvas,
-                title=f"Curvas {inicio} a {fim} - {item['header'].file_name}",
-                index_type=item["header"].index_type,
+                title=f"Curvas {inicio} a {fim} - {get_header_value(item, 'file_name')}",
+                index_type=get_header_value(item, "index_type"),
                 label_formatter=format_axis_label_global,
             )
 
@@ -489,7 +695,17 @@ with abas[1]:
         curve_y = st.selectbox("Curva Y", item["valid_curves"], key="cy")
 
         if curve_x != curve_y:
-            cross_fig = plot_crossplot(item["df"], curve_x, curve_y)
+            if is_indexed_mode(item):
+                crossplot_df = read_selected_curves(
+                    parquet_path=item["parquet_file"],
+                    fixed_variable=curve_x,
+                    selected_variables=[curve_y],
+                )
+                crossplot_df = downsample_df(crossplot_df, max_points=10_000)
+            else:
+                crossplot_df = item["df"]
+
+            cross_fig = plot_crossplot(crossplot_df, curve_x, curve_y)
             st.plotly_chart(cross_fig, width="stretch")
         else:
             st.info("Escolha curvas diferentes.")
@@ -512,15 +728,35 @@ with abas[2]:
         else:
             curve_name = st.selectbox("Curva", common_curves)
 
+            if is_indexed_mode(datasets[0]):
+                df1 = read_selected_curves(
+                    parquet_path=datasets[0]["parquet_file"],
+                    fixed_variable="__INDEX__",
+                    selected_variables=[curve_name],
+                )
+            else:
+                df1 = datasets[0]["df"]
+
+            if is_indexed_mode(datasets[1]):
+                df2 = read_selected_curves(
+                    parquet_path=datasets[1]["parquet_file"],
+                    fixed_variable="__INDEX__",
+                    selected_variables=[curve_name],
+                )
+            else:
+                df2 = datasets[1]["df"]
+
             compare_df = compare_curves_between_wells(
-                datasets[0]["df"],
-                datasets[1]["df"],
+                df1,
+                df2,
                 curve_name,
             )
 
             if compare_df.empty:
                 st.warning("Não foi possível alinhar índices.")
             else:
+                compare_df = downsample_df(compare_df, max_points=10_000)
+
                 st.dataframe(compare_df.head(200), width="stretch")
 
                 fig = plot_compare_wells(compare_df, curve_name)
