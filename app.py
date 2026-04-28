@@ -39,15 +39,14 @@ from src.parquet_store import (
 from src.las_indexer import index_las_file
 
 
-# def get_env() -> str:
-#     try:
-#         return str(st.secrets["LASVIEWER_ENV"])
-#     except Exception:
-#         return os.getenv("LASVIEWER_ENV", "local")
+def get_env() -> str:
+    try:
+        return str(st.secrets["LASVIEWER_ENV"])
+    except Exception:
+        return os.getenv("LASVIEWER_ENV", "local")
 
 
-# ENV = get_env()
-ENV = os.environ.get("ENV")
+ENV = get_env()
 
 
 st.set_page_config(page_title="Leitor LAS", layout="wide")
@@ -63,34 +62,23 @@ UPLOADED_PARQUET_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def get_execution_environment() -> str:
-    # 1) Override manual por variável ENV
-    value = str(ENV or "").strip().lower()
+    value = str(ENV or "local").strip().lower()
 
     local_values = {"local", "servidor", "server", "caminho_local", "local_server"}
     cloud_values = {"streamlit_cloud", "cloud", "streamlit"}
 
     if value in local_values:
         return "local"
-
     if value in cloud_values:
         return "streamlit_cloud"
 
-    # 2) Detecção automática do Streamlit Community Cloud
-    cwd = Path.cwd()
-
-    if str(cwd).startswith("/mount/src"):
-        return "streamlit_cloud"
-
-    if os.environ.get("HOME") == "/home/adminuser":
-        return "streamlit_cloud"
-
-    # 3) Fallback
     return "local"
 
 
 EXECUTION_ENV = get_execution_environment()
 IS_LOCAL_ENV = EXECUTION_ENV == "local"
 IS_STREAMLIT_CLOUD_ENV = EXECUTION_ENV == "streamlit_cloud"
+
 
 def create_indexed_files_zip(metadata_path: Path, parquet_path: Path) -> bytes:
     zip_buffer = BytesIO()
@@ -328,55 +316,28 @@ def abrir_dialogo_indexacao():
             "Envie o arquivo LAS pelo navegador. Ao final, baixe um único `.zip` "
             "contendo o `.metadata.json` e o `.parquet`."
         )
-
-        uploaded_las = st.file_uploader(
-            "Selecione o arquivo LAS para indexar",
-            type=["las"],
-            accept_multiple_files=False,
-        )
-
-        if uploaded_las is None:
-            st.info("Envie um arquivo LAS para iniciar a indexação.")
-        else:
-            origem_upload = True
-            las_path = save_uploaded_file(uploaded_las, INDEXED_DIR)
-            output_dir_final = INDEXED_DIR
-
-            st.write("**Arquivo LAS recebido:**")
-            st.code(uploaded_las.name)
-
     else:
         st.info(
             "Ambiente configurado: **Caminho local/servidor**. "
-            "Informe o caminho completo do LAS. Os arquivos gerados serão salvos "
-            "na mesma pasta do arquivo original."
+            "Selecione o arquivo LAS pelo navegador. Os arquivos indexados serão "
+            "gerados na pasta local `app_data/indexed`."
         )
 
-        las_path_input = st.text_input(
-            "Caminho completo do arquivo LAS",
-            value="",
-            placeholder=r"D:\dados\poco_01.las",
-            help="Use um caminho acessível pela máquina onde o Streamlit está executando.",
-        )
+    uploaded_las = st.file_uploader(
+        "Selecione o arquivo LAS para indexar",
+        type=["las"],
+        accept_multiple_files=False,
+    )
 
-        if las_path_input:
-            las_path_input = las_path_input.strip().strip('"')
-            las_path = Path(las_path_input)
+    if uploaded_las is None:
+        st.info("Envie um arquivo LAS para iniciar a indexação.")
+    else:
+        origem_upload = True
+        las_path = save_uploaded_file(uploaded_las, INDEXED_DIR)
+        output_dir_final = INDEXED_DIR
 
-            if not las_path.exists():
-                st.error(f"Arquivo não encontrado: {las_path}")
-                las_path = None
-            elif not las_path.is_file():
-                st.error(f"O caminho informado não é um arquivo: {las_path}")
-                las_path = None
-            else:
-                output_dir_final = las_path.parent
-                st.write("**Arquivo LAS selecionado:**")
-                st.code(str(las_path))
-                st.write("**Pasta de saída da indexação:**")
-                st.code(str(output_dir_final))
-        else:
-            st.info("Informe o caminho completo do arquivo LAS.")
+        st.write("**Arquivo LAS recebido:**")
+        st.code(uploaded_las.name)
 
     if st.button("Indexar LAS", disabled=las_path is None or output_dir_final is None):
         with st.spinner("Indexando arquivo LAS..."):
@@ -424,7 +385,6 @@ with st.sidebar:
     st.sidebar.caption(f"Ambiente: {EXECUTION_ENV}")
     st.sidebar.caption(f"Diretório: {Path.cwd()}")
     st.header("Configurações")
-    
 
     if st.button("Indexar arquivo LAS", type="secondary"):
         abrir_dialogo_indexacao()
