@@ -93,15 +93,19 @@ def index_las_file(las_path: str | Path, output_dir: str | Path) -> dict:
 
         tempo_min = tempo_min_value.isoformat() if pd.notna(tempo_min_value) else None
         tempo_max = tempo_max_value.isoformat() if pd.notna(tempo_max_value) else None
-        
+
     parquet_path = output_dir / f"{las_path.stem}.parquet"
     metadata_path = output_dir / f"{las_path.stem}.metadata.json"
 
     df.to_parquet(parquet_path, index=False, engine="pyarrow", compression="snappy")
 
     metadata = {
-        "source_file": str(las_path),
-        "parquet_file": str(parquet_path),
+        "source_file": las_path.name,
+        "source_absolute_path": str(las_path.resolve()),
+        "parquet_file": parquet_path.name,
+        "parquet_absolute_path": str(parquet_path.resolve()),
+        "metadata_file": metadata_path.name,
+        "metadata_absolute_path": str(metadata_path.resolve()),
         "header": asdict(header),
         "time_unit": time_unit,
         "curves_metadata": metadata_df.to_dict(orient="records"),
@@ -109,7 +113,6 @@ def index_las_file(las_path: str | Path, output_dir: str | Path) -> dict:
         "valid_curves": valid_curves,
         "columns": list(df.columns),
         "total_records": int(len(df)),
-
         "index_min": index_min,
         "index_max": index_max,
         "md_min": md_min,

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
+import zipfile
+from io import BytesIO
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
@@ -36,8 +39,138 @@ from src.parquet_store import (
 from src.las_indexer import index_las_file
 
 
+def get_env() -> str:
+    try:
+        return str(st.secrets["LASVIEWER_ENV"])
+    except Exception:
+        return os.getenv("LASVIEWER_ENV", "local")
+
+
+ENV = get_env()
+
+
 st.set_page_config(page_title="Leitor LAS", layout="wide")
 st.title("Leitor e Analisador de Arquivos LAS")
+
+
+APP_DATA_DIR = Path("app_data")
+INDEXED_DIR = APP_DATA_DIR / "indexed"
+UPLOADED_PARQUET_DIR = APP_DATA_DIR / "uploaded_parquet"
+
+INDEXED_DIR.mkdir(parents=True, exist_ok=True)
+UPLOADED_PARQUET_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def get_execution_environment() -> str:
+    value = str(ENV or "local").strip().lower()
+
+    local_values = {"local", "servidor", "server", "caminho_local", "local_server"}
+    cloud_values = {"streamlit_cloud", "cloud", "streamlit"}
+
+    if value in local_values:
+        return "local"
+    if value in cloud_values:
+        return "streamlit_cloud"
+
+    return "local"
+
+
+EXECUTION_ENV = get_execution_environment()
+IS_LOCAL_ENV = EXECUTION_ENV == "local"
+IS_STREAMLIT_CLOUD_ENV = EXECUTION_ENV == "streamlit_cloud"
+
+
+def create_indexed_files_zip(metadata_path: Path, parquet_path: Path) -> bytes:
+    zip_buffer = BytesIO()
+
+    with zipfile.ZipFile(zip_buffer, mode="w", compression=zipfile.ZIP_DEFLATED) as zip_file:
+        zip_file.write(metadata_path, arcname=metadata_path.name)
+        zip_file.write(parquet_path, arcname=parquet_path.name)
+
+    zip_buffer.seek(0)
+    return zip_buffer.getvalue()
+
+
+def save_uploaded_file(uploaded_file, output_dir: Path) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    destination = output_dir / Path(uploaded_file.name).name
+
+    with open(destination, "wb") as file:
+        file.write(uploaded_file.getbuffer())
+
+    return destination
+
+
+def candidate_parquet_names(metadata: dict, metadata_file_name: str) -> list[str]:
+    names: list[str] = []
+
+    parquet_file = metadata.get("parquet_file")
+    if parquet_file:
+        names.append(Path(str(parquet_file)).name)
+
+    if metadata_file_name.endswith(".metadata.json"):
+        names.append(metadata_file_name.replace(".metadata.json", ".parquet"))
+
+    source_file = metadata.get("source_file")
+    if source_file:
+        names.append(f"{Path(str(source_file)).stem}.parquet")
+
+    header = metadata.get("header", {})
+    if isinstance(header, dict) and header.get("file_name"):
+        names.append(f"{Path(str(header['file_name'])).stem}.parquet")
+
+    return list(dict.fromkeys(names))
+
+
+def find_parquet_path(
+    metadata: dict,
+    metadata_file_name: str,
+    parquet_paths_by_name: dict[str, Path],
+    metadata_dir: Path | None = None,
+) -> Path | None:
+    for absolute_key in ("parquet_absolute_path", "parquet_path"):
+        absolute_value = metadata.get(absolute_key)
+        if absolute_value:
+            absolute_path = Path(str(absolute_value))
+            if absolute_path.exists() and absolute_path.is_file():
+                return absolute_path
+
+    for parquet_name in candidate_parquet_names(metadata, metadata_file_name):
+        parquet_path = parquet_paths_by_name.get(parquet_name)
+        if parquet_path is not None and parquet_path.exists():
+            return parquet_path
+
+    parquet_file = metadata.get("parquet_file")
+    if parquet_file:
+        parquet_path = Path(str(parquet_file))
+        file_name = parquet_path.name
+
+        candidates: list[Path] = []
+
+        if parquet_path.exists() and parquet_path.is_file():
+            return parquet_path
+
+        if metadata_dir is not None:
+            candidates.extend([
+                metadata_dir / parquet_path,
+                metadata_dir / file_name,
+            ])
+
+        project_root = Path(__file__).resolve().parent
+        candidates.extend([
+            project_root / parquet_path,
+            Path.cwd() / parquet_path,
+            project_root / file_name,
+            Path.cwd() / file_name,
+            INDEXED_DIR / file_name,
+            UPLOADED_PARQUET_DIR / file_name,
+        ])
+
+        for candidate in candidates:
+            if candidate.exists() and candidate.is_file():
+                return candidate
+
+    return None
 
 
 def preview_las_file(file_path: str, extra_lines_after_ascii: int = 5) -> str:
@@ -173,49 +306,67 @@ def abrir_dialogo_indexacao():
         "`Parquet` e `metadata.json`."
     )
 
-    st.info(
-        "Para arquivos LAS grandes, informe o caminho local do arquivo. "
-        "O arquivo LAS original não será movido. O `.parquet` e o `.metadata.json` "
-        "serão salvos na mesma pasta do LAS."
-    )
-
-    st.markdown("**Arquivo LAS de origem**")
-
-    las_path_input = st.text_input(
-        "Cole aqui o caminho completo do arquivo LAS",
-        value="",
-        placeholder=r"D:\dados\poco_01.las",
-        help="No Windows, clique com o botão direito no arquivo LAS, escolha 'Copiar como caminho' e cole aqui.",
-    )
-
-    if las_path_input:
-        las_path_input = las_path_input.strip().strip('"')
-
     las_path: Path | None = None
     output_dir_final: Path | None = None
+    origem_upload = False
 
-    if las_path_input:
-        las_path = Path(las_path_input)
+    if IS_STREAMLIT_CLOUD_ENV:
+        st.info(
+            "Ambiente configurado: **Streamlit Cloud**. "
+            "Envie o arquivo LAS pelo navegador. Ao final, baixe um único `.zip` "
+            "contendo o `.metadata.json` e o `.parquet`."
+        )
 
-        if not las_path.exists():
-            st.error(f"Arquivo não encontrado: {las_path}")
-            las_path = None
-        elif not las_path.is_file():
-            st.error(f"O caminho informado não é um arquivo: {las_path}")
-            las_path = None
+        uploaded_las = st.file_uploader(
+            "Selecione o arquivo LAS para indexar",
+            type=["las"],
+            accept_multiple_files=False,
+        )
+
+        if uploaded_las is None:
+            st.info("Envie um arquivo LAS para iniciar a indexação.")
         else:
-            output_dir_final = las_path.parent
-            st.write("**Arquivo LAS selecionado:**")
-            st.code(str(las_path))
-            st.write("**Pasta de saída da indexação:**")
-            st.code(str(output_dir_final))
-    else:
-        st.info("Informe o caminho completo do arquivo LAS.")
+            origem_upload = True
+            las_path = save_uploaded_file(uploaded_las, INDEXED_DIR)
+            output_dir_final = INDEXED_DIR
 
-    # =========================
-    # EXECUÇÃO DA INDEXAÇÃO
-    # =========================
-    if st.button("Indexar LAS", disabled=las_path is None):
+            st.write("**Arquivo LAS recebido:**")
+            st.code(uploaded_las.name)
+
+    else:
+        st.info(
+            "Ambiente configurado: **Caminho local/servidor**. "
+            "Informe o caminho completo do LAS. Os arquivos gerados serão salvos "
+            "na mesma pasta do arquivo original."
+        )
+
+        las_path_input = st.text_input(
+            "Caminho completo do arquivo LAS",
+            value="",
+            placeholder=r"D:\dados\poco_01.las",
+            help="Use um caminho acessível pela máquina onde o Streamlit está executando.",
+        )
+
+        if las_path_input:
+            las_path_input = las_path_input.strip().strip('"')
+            las_path = Path(las_path_input)
+
+            if not las_path.exists():
+                st.error(f"Arquivo não encontrado: {las_path}")
+                las_path = None
+            elif not las_path.is_file():
+                st.error(f"O caminho informado não é um arquivo: {las_path}")
+                las_path = None
+            else:
+                output_dir_final = las_path.parent
+                st.write("**Arquivo LAS selecionado:**")
+                st.code(str(las_path))
+                st.write("**Pasta de saída da indexação:**")
+                st.code(str(output_dir_final))
+        else:
+            st.info("Informe o caminho completo do arquivo LAS.")
+
+    if st.button("Indexar LAS", disabled=las_path is None or output_dir_final is None):
         with st.spinner("Indexando arquivo LAS..."):
             metadata = index_las_file(
                 las_path=las_path,
@@ -223,14 +374,28 @@ def abrir_dialogo_indexacao():
             )
 
         metadata_path = output_dir_final / f"{las_path.stem}.metadata.json"
+        parquet_path = output_dir_final / f"{las_path.stem}.parquet"
 
         st.success("Indexação concluída.")
 
         st.write("**Arquivo Parquet gerado:**")
-        st.code(metadata["parquet_file"])
+        st.code(str(parquet_path))
 
         st.write("**Arquivo de metadados gerado:**")
         st.code(str(metadata_path))
+
+        if IS_STREAMLIT_CLOUD_ENV or origem_upload:
+            zip_bytes = create_indexed_files_zip(metadata_path, parquet_path)
+            zip_name = f"{las_path.stem}.indexado.zip"
+
+            st.download_button(
+                "Baixar arquivos indexados (.zip)",
+                data=zip_bytes,
+                file_name=zip_name,
+                mime="application/zip",
+            )
+        else:
+            st.info("Os arquivos foram salvos automaticamente na mesma pasta do LAS original.")
 
         st.write("**Total de registros:**")
         st.metric("Registros", metadata["total_records"])
@@ -239,11 +404,6 @@ def abrir_dialogo_indexacao():
         st.dataframe(
             pd.DataFrame({"curves": metadata["valid_curves"]}),
             width="stretch",
-        )
-
-        st.info(
-            "Para visualizar, feche este modal, escolha o modo "
-            "'Visualizar LAS indexado' e selecione o arquivo `.metadata.json` gerado."
         )
 
 
@@ -287,22 +447,99 @@ with st.sidebar:
         ]
 
     else:
-        uploaded_metadata_files = st.file_uploader(
-            "Selecione um ou dois arquivos .metadata.json",
-            type=["json"],
-            accept_multiple_files=True,
-        )
+        if IS_STREAMLIT_CLOUD_ENV:
+            st.info(
+                "Ambiente configurado: **Streamlit Cloud**. Envie o `.metadata.json` "
+                "e o `.parquet` correspondente."
+            )
 
-        if not uploaded_metadata_files:
-            st.info("Envie pelo menos um arquivo .metadata.json indexado.")
-            st.stop()
+            uploaded_metadata_files = st.file_uploader(
+                "Selecione um ou dois arquivos .metadata.json",
+                type=["json"],
+                accept_multiple_files=True,
+                key="metadata_json_files",
+            )
 
-        if len(uploaded_metadata_files) > 2:
-            st.warning("Por enquanto, envie no máximo dois arquivos indexados.")
-            st.stop()
+            uploaded_parquet_files = st.file_uploader(
+                "Selecione os arquivos .parquet correspondentes",
+                type=["parquet"],
+                accept_multiple_files=True,
+                key="metadata_parquet_files",
+            )
 
-        for metadata_file in uploaded_metadata_files:
-            metadata = json.loads(metadata_file.getvalue().decode("utf-8"))
+            if not uploaded_metadata_files:
+                st.info("Envie pelo menos um arquivo .metadata.json indexado.")
+                st.stop()
+
+            if not uploaded_parquet_files:
+                st.info("Envie também o `.parquet` correspondente ao metadata.")
+                st.stop()
+
+            if len(uploaded_metadata_files) > 2:
+                st.warning("Por enquanto, envie no máximo dois arquivos indexados.")
+                st.stop()
+
+            parquet_paths_by_name = {
+                parquet_file.name: save_uploaded_file(parquet_file, UPLOADED_PARQUET_DIR)
+                for parquet_file in uploaded_parquet_files
+            }
+
+            metadata_items = []
+            for metadata_file in uploaded_metadata_files:
+                metadata = json.loads(metadata_file.getvalue().decode("utf-8"))
+                metadata_items.append((metadata_file.name, metadata, None))
+
+        else:
+            st.info(
+                "Ambiente configurado: **Caminho local/servidor**. "
+                "Selecione apenas o arquivo `.metadata.json`. "
+                "O app localizará automaticamente o `.parquet` correspondente "
+                "pelo caminho salvo no metadata ou na mesma pasta do arquivo indexado."
+            )
+
+            uploaded_metadata_files = st.file_uploader(
+                "Selecione um ou dois arquivos .metadata.json",
+                type=["json"],
+                accept_multiple_files=True,
+                key="local_metadata_json_files",
+            )
+
+            if not uploaded_metadata_files:
+                st.info("Selecione pelo menos um arquivo .metadata.json indexado.")
+                st.stop()
+
+            if len(uploaded_metadata_files) > 2:
+                st.warning("Por enquanto, selecione no máximo dois arquivos indexados.")
+                st.stop()
+
+            parquet_paths_by_name = {}
+            metadata_items = []
+
+            for metadata_file in uploaded_metadata_files:
+                metadata = json.loads(metadata_file.getvalue().decode("utf-8"))
+
+                metadata_tmp = NamedTemporaryFile(delete=False, suffix=".metadata.json")
+                metadata_tmp.write(metadata_file.getvalue())
+                metadata_tmp.close()
+                metadata_path = Path(metadata_tmp.name)
+
+                metadata_items.append((metadata_file.name, metadata, metadata_path.parent))
+
+        for metadata_file_name, metadata, metadata_dir in metadata_items:
+            parquet_path = find_parquet_path(
+                metadata=metadata,
+                metadata_file_name=metadata_file_name,
+                parquet_paths_by_name=parquet_paths_by_name,
+                metadata_dir=metadata_dir,
+            )
+
+            if parquet_path is None:
+                st.error(
+                    "Não encontrei o arquivo Parquet correspondente ao metadata "
+                    f"`{metadata_file_name}`. Nomes esperados: "
+                    f"{', '.join(candidate_parquet_names(metadata, metadata_file_name))}."
+                )
+                st.stop()
 
             metadata_df = pd.DataFrame(metadata["curves_metadata"])
             stats_df = pd.DataFrame(metadata["stats"])
@@ -314,12 +551,15 @@ with st.sidebar:
                     "stats_df": stats_df,
                     "valid_curves": metadata["valid_curves"],
                     "preview_text": f"Arquivo indexado: {metadata.get('source_file', '-')}",
-                    "parquet_file": metadata["parquet_file"],
+                    "parquet_file": str(parquet_path),
+                    "metadata_path": metadata_dir,
                     "time_unit": metadata.get("time_unit"),
                     "index_min": metadata.get("index_min"),
                     "index_max": metadata.get("index_max"),
                     "md_min": metadata.get("md_min"),
                     "md_max": metadata.get("md_max"),
+                    "tempo_min": metadata.get("tempo_min"),
+                    "tempo_max": metadata.get("tempo_max"),
                     "columns": metadata.get("columns", []),
                     "modo_indexado": True,
                 }
@@ -624,6 +864,7 @@ with abas[1]:
                 parquet_path=item["parquet_file"],
                 fixed_variable=variavel_fixa,
                 selected_variables=variaveis_multiplas,
+                metadata_path=item.get("metadata_path"),
             )
 
             df_plot = downsample_df(df_plot, max_points=10_000)
@@ -700,6 +941,7 @@ with abas[1]:
                     parquet_path=item["parquet_file"],
                     fixed_variable=curve_x,
                     selected_variables=[curve_y],
+                    metadata_path=item.get("metadata_path"),
                 )
                 crossplot_df = downsample_df(crossplot_df, max_points=10_000)
             else:
@@ -733,6 +975,7 @@ with abas[2]:
                     parquet_path=datasets[0]["parquet_file"],
                     fixed_variable="__INDEX__",
                     selected_variables=[curve_name],
+                    metadata_path=datasets[0].get("metadata_path"),
                 )
             else:
                 df1 = datasets[0]["df"]
@@ -742,6 +985,7 @@ with abas[2]:
                     parquet_path=datasets[1]["parquet_file"],
                     fixed_variable="__INDEX__",
                     selected_variables=[curve_name],
+                    metadata_path=datasets[1].get("metadata_path"),
                 )
             else:
                 df2 = datasets[1]["df"]

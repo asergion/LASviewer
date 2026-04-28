@@ -27,6 +27,21 @@ Caso seja necessário, permite executar scripts locais (como o Activate.ps1)
 # desativa o ambiente virtual
 > deactivate
 
+## Ambiente local/servidor
+Configure:
+
+```powershell
+$env:LASVIEWER_ENV="local"
+python -m streamlit run app.py
+```
+
+Comportamento:
+- Na indexação, informe o caminho completo do arquivo `.las`.
+- O `.metadata.json` e o `.parquet` são salvos na mesma pasta do LAS.
+- Em "Visualizar LAS indexado", informe somente o caminho do `.metadata.json`.
+- O app localiza automaticamente o `.parquet` na mesma pasta.
+
+
 ## Getting started
 
 To make it easy for you to get started with GitLab, here's a list of recommended next steps.

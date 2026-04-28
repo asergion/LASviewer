@@ -11,10 +11,36 @@ def load_metadata(metadata_path: str | Path) -> dict:
         return json.load(file)
 
 
+def resolve_parquet_path(
+    parquet_path: str | Path,
+    metadata_path: str | Path | None = None,
+) -> Path:
+    path = Path(parquet_path)
+
+    if path.exists() and path.is_file():
+        return path
+
+    if metadata_path is not None:
+        metadata_dir = Path(metadata_path)
+
+        if metadata_dir.is_file():
+            metadata_dir = metadata_dir.parent
+
+        candidate = metadata_dir / path.name
+        if candidate.exists() and candidate.is_file():
+            return candidate
+
+    raise FileNotFoundError(
+        "Arquivo Parquet não encontrado. "
+        f"Caminho recebido: {parquet_path}"
+    )
+
+
 def read_selected_curves(
     parquet_path: str | Path,
     fixed_variable: str,
     selected_variables: list[str],
+    metadata_path: str | Path | None = None,
 ) -> pd.DataFrame:
     columns = [fixed_variable] + selected_variables
 
@@ -22,9 +48,10 @@ def read_selected_curves(
         columns.append("__INDEX__")
 
     columns = list(dict.fromkeys(columns))
+    resolved_parquet_path = resolve_parquet_path(parquet_path, metadata_path)
 
     return pd.read_parquet(
-        parquet_path,
+        resolved_parquet_path,
         columns=columns,
         engine="pyarrow",
     )
