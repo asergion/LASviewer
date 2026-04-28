@@ -61,14 +61,19 @@ INDEXED_DIR.mkdir(parents=True, exist_ok=True)
 UPLOADED_PARQUET_DIR.mkdir(parents=True, exist_ok=True)
 
 
+import os
+
 def get_execution_environment() -> str:
-    value = str(ENV or "local").strip().lower()
+    # 1. Detecta automaticamente Streamlit Cloud
+    if os.environ.get("STREAMLIT_SERVER_HEADLESS") == "true":
+        return "streamlit_cloud"
+
+    # 2. Permite override manual (ENV)
+    value = str(os.environ.get("ENV", "local")).strip().lower()
 
     local_values = {"local", "servidor", "server", "caminho_local", "local_server"}
     cloud_values = {"streamlit_cloud", "cloud", "streamlit"}
 
-    if value in local_values:
-        return "local"
     if value in cloud_values:
         return "streamlit_cloud"
 
