@@ -92,9 +92,6 @@ EXECUTION_ENV = get_execution_environment()
 IS_LOCAL_ENV = EXECUTION_ENV == "local"
 IS_STREAMLIT_CLOUD_ENV = EXECUTION_ENV == "streamlit_cloud"
 
-print("EXECUTION_ENV = ",EXECUTION_ENV)
-
-
 def create_indexed_files_zip(metadata_path: Path, parquet_path: Path) -> bytes:
     zip_buffer = BytesIO()
 
@@ -424,8 +421,8 @@ def abrir_dialogo_indexacao():
 
 # SIDEBAR CONFIGURACOES
 with st.sidebar:
-    st.sidebar.caption(f"Ambiente detectado: {EXECUTION_ENV}")
-    st.sidebar.caption(f"Diretório atual: {Path.cwd()}")
+    st.sidebar.caption(f"Ambiente: {EXECUTION_ENV}")
+    st.sidebar.caption(f"Diretório: {Path.cwd()}")
     st.header("Configurações")
     
 
