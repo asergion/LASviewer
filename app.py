@@ -81,6 +81,7 @@ def get_execution_environment() -> str:
 
 
 EXECUTION_ENV = get_execution_environment()
+print("EXECUTION_ENV = ",EXECUTION_ENV)
 IS_LOCAL_ENV = EXECUTION_ENV == "local"
 IS_STREAMLIT_CLOUD_ENV = EXECUTION_ENV == "streamlit_cloud"
 
