@@ -39,14 +39,15 @@ from src.parquet_store import (
 from src.las_indexer import index_las_file
 
 
-def get_env() -> str:
-    try:
-        return str(st.secrets["LASVIEWER_ENV"])
-    except Exception:
-        return os.getenv("LASVIEWER_ENV", "local")
+# def get_env() -> str:
+#     try:
+#         return str(st.secrets["LASVIEWER_ENV"])
+#     except Exception:
+#         return os.getenv("LASVIEWER_ENV", "local")
 
 
-ENV = get_env()
+# ENV = get_env()
+ENV = os.environ.get("ENV")
 
 
 st.set_page_config(page_title="Leitor LAS", layout="wide")
@@ -61,29 +62,37 @@ INDEXED_DIR.mkdir(parents=True, exist_ok=True)
 UPLOADED_PARQUET_DIR.mkdir(parents=True, exist_ok=True)
 
 
-import os
-
 def get_execution_environment() -> str:
-    # 1. Detecta automaticamente Streamlit Cloud
-    if os.environ.get("STREAMLIT_SERVER_HEADLESS") == "true":
-        return "streamlit_cloud"
-
-    # 2. Permite override manual (ENV)
-    value = str(os.environ.get("ENV", "local")).strip().lower()
+    # 1) Override manual por variável ENV
+    value = str(ENV or "").strip().lower()
 
     local_values = {"local", "servidor", "server", "caminho_local", "local_server"}
     cloud_values = {"streamlit_cloud", "cloud", "streamlit"}
 
+    if value in local_values:
+        return "local"
+
     if value in cloud_values:
         return "streamlit_cloud"
 
+    # 2) Detecção automática do Streamlit Community Cloud
+    cwd = Path.cwd()
+
+    if str(cwd).startswith("/mount/src"):
+        return "streamlit_cloud"
+
+    if os.environ.get("HOME") == "/home/adminuser":
+        return "streamlit_cloud"
+
+    # 3) Fallback
     return "local"
 
 
 EXECUTION_ENV = get_execution_environment()
-print("EXECUTION_ENV = ",EXECUTION_ENV)
 IS_LOCAL_ENV = EXECUTION_ENV == "local"
 IS_STREAMLIT_CLOUD_ENV = EXECUTION_ENV == "streamlit_cloud"
+
+print("EXECUTION_ENV = ",EXECUTION_ENV)
 
 
 def create_indexed_files_zip(metadata_path: Path, parquet_path: Path) -> bytes:
@@ -415,7 +424,10 @@ def abrir_dialogo_indexacao():
 
 # SIDEBAR CONFIGURACOES
 with st.sidebar:
+    st.sidebar.caption(f"Ambiente detectado: {EXECUTION_ENV}")
+    st.sidebar.caption(f"Diretório atual: {Path.cwd()}")
     st.header("Configurações")
+    
 
     if st.button("Indexar arquivo LAS", type="secondary"):
         abrir_dialogo_indexacao()
