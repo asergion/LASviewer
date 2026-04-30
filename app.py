@@ -6,6 +6,7 @@ import zipfile
 from io import BytesIO
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+import matplotlib.pyplot as plt
 
 import streamlit as st
 import pandas as pd
@@ -38,7 +39,6 @@ from src.parquet_store import (
 
 from src.las_indexer import index_las_file
 
-
 def get_env() -> str:
     try:
         return str(st.secrets["LASVIEWER_ENV"])
@@ -50,8 +50,29 @@ ENV = get_env()
 
 
 st.set_page_config(page_title="Leitor LAS", layout="wide")
-st.title("Leitor e Analisador de Arquivos LAS")
 
+st.markdown(
+    """
+    <style>
+    div.stDownloadButton > button {
+        min-height: 24px !important;
+        height: 24px !important;
+        padding: 0px 10px !important;
+        font-size: 12px !important;
+        line-height: 1 !important;
+        border-radius: 6px !important;
+    }
+
+    div.stDownloadButton > button p {
+        margin: 0px !important;
+        line-height: 1 !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.title("Leitor e Analisador de Arquivos LAS")
 
 APP_DATA_DIR = Path("app_data")
 INDEXED_DIR = APP_DATA_DIR / "indexed"
@@ -248,6 +269,42 @@ def get_header_value(item: dict, key: str):
 def is_indexed_mode(item: dict) -> bool:
     return item.get("modo_indexado", False)
 
+def dataframe_to_image(df: pd.DataFrame):
+    df_export = df.copy()
+    df_export.insert(0, "#", df_export.index)
+
+    n_rows, n_cols = df_export.shape
+
+    fig_width = n_cols * 1.2
+    fig_height = n_rows * 0.3
+
+    fig, ax = plt.subplots(figsize=(fig_width, fig_height))
+    ax.axis("off")
+
+    table = ax.table(
+        cellText=df_export.values,
+        colLabels=df_export.columns,
+        loc="center"
+    )
+
+    table.auto_set_font_size(False)
+    table.set_fontsize(8)
+    table.scale(1, 1.2)
+    table.auto_set_column_width(col=list(range(n_cols)))
+
+    plt.subplots_adjust(left=0, right=1, top=1, bottom=0)
+
+    buf = BytesIO()
+    plt.savefig(
+        buf,
+        format="png",
+        bbox_inches="tight",
+        pad_inches=0
+    )
+    buf.seek(0)
+    plt.close(fig)
+
+    return buf
 
 @st.cache_data(show_spinner=True)
 def load_uploaded_las(file_bytes: bytes, file_name: str):
@@ -787,16 +844,33 @@ with abas[0]:
             st.write("**Curvas presentes**")
             st.dataframe(item["metadata_df"].head(200), width="stretch")
 
-            st.write("**Estatísticas das curvas (somente válidas)**")
             stats_filtrado = item["stats_df"][item["stats_df"]["valid_values"] > 0].copy()
             stats_filtrado.index = stats_filtrado.index + 1
 
             if stats_filtrado.empty:
                 st.warning("Nenhuma curva com dados válidos.")
             else:
-                st.dataframe(stats_filtrado.head(200), width="stretch")
+                df_export = stats_filtrado.head(200)
+                img = dataframe_to_image(df_export)
 
-            st.write("**Unidades e descrições das curvas válidas**")
+                col_titulo, col_botao, col_fill = st.columns([0.5, 0.2, 0.3], gap="small")
+
+                with col_titulo:
+                    st.markdown("**Estatísticas das curvas (somente válidas)**")
+
+                with col_botao:
+                    st.download_button(
+                        label="⭳ PNG",
+                        data=img,
+                        file_name="tabela_curvas.png",
+                        mime="image/png",
+                        key=f"download_stats_png_{i}",
+                    )
+
+                with col_fill:
+                    st.write(" ")
+
+                st.dataframe(df_export, width="stretch")
 
             curvas_validas = stats_filtrado["curve"].tolist()
 
@@ -814,7 +888,30 @@ with abas[0]:
 
             metadata_validas.index = range(1, len(metadata_validas) + 1)
 
-            st.dataframe(metadata_validas.head(200), width="stretch")
+            df_metadata_export = metadata_validas.head(200)
+            img_metadata = dataframe_to_image(df_metadata_export)
+
+            col_titulo_metadata, col_botao_metadata, col_fill_metadata = st.columns(
+                [0.5, 0.2, 0.3],
+                gap="small",
+            )
+
+            with col_titulo_metadata:
+                st.markdown("**Unidades e descrições das curvas válidas**")
+
+            with col_botao_metadata:
+                st.download_button(
+                    label="⭳ PNG",
+                    data=img_metadata,
+                    file_name="tabela_unidades_descricoes.png",
+                    mime="image/png",
+                    key=f"download_metadata_png_{i}",
+                )
+
+            with col_fill_metadata:
+                st.write(" ")
+
+            st.dataframe(df_metadata_export, width="stretch")
 
         with col_preview:
             st.markdown("**Pré-visualização do arquivo LAS**")
