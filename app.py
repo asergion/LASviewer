@@ -864,7 +864,7 @@ with abas[0]:
                         data=img,
                         file_name="tabela_curvas.png",
                         mime="image/png",
-                        key=f"download_stats_png_{i}",
+                        key=f"download_stats_png_{i}_{get_header_value(item, 'file_name')}",
                     )
 
                 with col_fill:
@@ -905,10 +905,10 @@ with abas[0]:
                     data=img_metadata,
                     file_name="tabela_unidades_descricoes.png",
                     mime="image/png",
-                    key=f"download_metadata_png_{i}",
+                    key=f"download_metadata_png_{i}_{get_header_value(item, 'file_name')}",
                 )
 
-            with col_fill_metadata:
+            with col_fill_metadata: 
                 st.write(" ")
 
             st.dataframe(df_metadata_export, width="stretch")
