@@ -6,3 +6,4 @@ plotly
 pyarrow
 python-dotenv
 matplotlib
+plotly

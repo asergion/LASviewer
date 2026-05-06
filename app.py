@@ -7,13 +7,17 @@ from io import BytesIO
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 import matplotlib.pyplot as plt
+import plotly.express as px
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 
 from src.analysis import (
+    classify_las_quality,
     compare_curves_between_wells,
+    compare_wells_metrics,
+    compute_time_metrics,
     curves_with_valid_data,
     numeric_curve_stats,
 )
@@ -367,18 +371,18 @@ def abrir_dialogo_indexacao():
     output_dir_final: Path | None = None
     origem_upload = False
 
-    if IS_STREAMLIT_CLOUD_ENV:
-        st.info(
-            "Ambiente configurado: **Streamlit Cloud**. "
-            "Envie o arquivo LAS pelo navegador. Ao final, baixe um único `.zip` "
-            "contendo o `.metadata.json` e o `.parquet`."
-        )
-    else:
-        st.info(
-            "Ambiente configurado: **Caminho local/servidor**. "
-            "Selecione o arquivo LAS pelo navegador. Os arquivos indexados serão "
-            "gerados na pasta local `app_data/indexed`."
-        )
+    # if IS_STREAMLIT_CLOUD_ENV:
+    #     st.info(
+    #         "Ambiente configurado: **Streamlit Cloud**. "
+    #         "Envie o arquivo LAS pelo navegador. Ao final, baixe um único `.zip` "
+    #         "contendo o `.metadata.json` e o `.parquet`."
+    #     )
+    # else:
+    #     st.info(
+    #         "Ambiente configurado: **Caminho local/servidor**. "
+    #         "Selecione o arquivo LAS pelo navegador. Os arquivos indexados serão "
+    #         "gerados na pasta local `app_data/indexed`."
+    #     )
 
     uploaded_las = st.file_uploader(
         "Selecione o arquivo LAS para indexar",
@@ -480,10 +484,10 @@ with st.sidebar:
 
     else:
         if IS_STREAMLIT_CLOUD_ENV:
-            st.info(
-                "Ambiente configurado: **Streamlit Cloud**. Envie o `.metadata.json` "
-                "e o `.parquet` correspondente."
-            )
+            # st.info(
+            #     "Ambiente configurado: **Streamlit Cloud**. Envie o `.metadata.json` "
+            #     "e o `.parquet` correspondente."
+            # )
 
             uploaded_metadata_files = st.file_uploader(
                 "Selecione um ou dois arquivos .metadata.json",
@@ -522,12 +526,12 @@ with st.sidebar:
                 metadata_items.append((metadata_file.name, metadata, None))
 
         else:
-            st.info(
-                "Ambiente configurado: **Caminho local/servidor**. "
-                "Selecione apenas o arquivo `.metadata.json`. "
-                "O app localizará automaticamente o `.parquet` correspondente "
-                "pelo caminho salvo no metadata ou na mesma pasta do arquivo indexado."
-            )
+            # st.info(
+            #     "Ambiente configurado: **Caminho local/servidor**. "
+            #     "Selecione apenas o arquivo `.metadata.json`. "
+            #     "O app localizará automaticamente o `.parquet` correspondente "
+            #     "pelo caminho salvo no metadata ou na mesma pasta do arquivo indexado."
+            # )
 
             uploaded_metadata_files = st.file_uploader(
                 "Selecione um ou dois arquivos .metadata.json",
@@ -741,9 +745,313 @@ with st.sidebar:
 
     st.session_state[estado_key] = variaveis_multiplas
 
+def load_index_for_quality(item: dict) -> pd.DataFrame:
+    if is_indexed_mode(item):
+        return read_selected_curves(
+            parquet_path=item["parquet_file"],
+            fixed_variable="__INDEX__",
+            selected_variables=[],
+            metadata_path=item.get("metadata_path"),
+        )
 
-abas = st.tabs(["Resumo", "Gráficos", "Comparação"])
+    return item["df"][["__INDEX__"]].copy()
 
+
+def analyze_index_quality(
+    df: pd.DataFrame,
+    index_type: str,
+    expected_step: float | None = None,
+) -> dict:
+    index_series = pd.to_numeric(df["__INDEX__"], errors="coerce").dropna()
+
+    if len(index_series) < 2:
+        return {
+            "total_registros": int(len(index_series)),
+            "status": "Dados insuficientes",
+        }
+
+    index_series = index_series.sort_values().reset_index(drop=True)
+    delta = index_series.diff().dropna()
+
+    if expected_step is None:
+        expected_step = float(delta.median())
+
+    index_min = float(index_series.min())
+    index_max = float(index_series.max())
+    amplitude = index_max - index_min
+
+    expected_records = None
+    missing_estimated = None
+    coverage_percent = None
+
+    if expected_step and expected_step > 0 and amplitude >= 0:
+        expected_records = int(round(amplitude / expected_step)) + 1
+        missing_estimated = max(expected_records - len(index_series), 0)
+        coverage_percent = (len(index_series) / expected_records) * 100 if expected_records > 0 else None
+
+    gap_limit = expected_step * 1.5 if expected_step else None
+    gaps = delta[delta > gap_limit] if gap_limit else pd.Series(dtype=float)
+
+    return {
+        "tipo_indexacao": index_type,
+        "total_registros": int(len(index_series)),
+        "indice_minimo": index_min,
+        "indice_maximo": index_max,
+        "amplitude": float(amplitude),
+        "passo_esperado": float(expected_step) if expected_step is not None else None,
+        "registros_esperados": expected_records,
+        "registros_ausentes_estimados": missing_estimated,
+        "cobertura_percentual": coverage_percent,
+        "delta_minimo": float(delta.min()),
+        "delta_mediano": float(delta.median()),
+        "delta_medio": float(delta.mean()),
+        "delta_maximo": float(delta.max()),
+        "desvio_padrao_delta": float(delta.std()) if pd.notna(delta.std()) else 0.0,
+        "quantidade_gaps": int(len(gaps)),
+        "maior_gap": float(gaps.max()) if not gaps.empty else 0.0,
+    }
+
+
+def classify_index_quality(diag: dict) -> tuple[str, str]:
+    if not diag or diag.get("status") == "Dados insuficientes":
+        return "warning", "Dados insuficientes para diagnóstico."
+
+    coverage = diag.get("cobertura_percentual")
+    gaps = diag.get("quantidade_gaps", 0)
+    max_gap = diag.get("maior_gap", 0)
+    expected_step = diag.get("passo_esperado") or 1
+
+    if coverage is not None and coverage < 90:
+        return "error", "Cobertura baixa: há forte indício de subamostragem ou lacunas."
+
+    if max_gap > expected_step * 10:
+        return "error", "Grandes gaps detectados na série."
+
+    if gaps > 0:
+        return "warning", "Foram detectados gaps acima do passo esperado."
+
+    return "success", "Amostragem aparentemente contínua para o passo estimado."
+
+
+def diagnostic_to_dataframe(diag: dict) -> pd.DataFrame:
+    labels = {
+        "tipo_indexacao": "Tipo de indexação",
+        "total_registros": "Total de registros",
+        "indice_minimo": "Índice mínimo",
+        "indice_maximo": "Índice máximo",
+        "amplitude": "Amplitude",
+        "passo_esperado": "Passo esperado",
+        "registros_esperados": "Registros esperados",
+        "registros_ausentes_estimados": "Registros ausentes estimados",
+        "cobertura_percentual": "Cobertura (%)",
+        "delta_minimo": "Delta mínimo",
+        "delta_mediano": "Delta mediano",
+        "delta_medio": "Delta médio",
+        "delta_maximo": "Delta máximo",
+        "desvio_padrao_delta": "Desvio padrão do delta",
+        "quantidade_gaps": "Quantidade de gaps",
+        "maior_gap": "Maior gap",
+        "status": "Status",
+    }
+
+    rows = []
+
+    for key, label in labels.items():
+        if key not in diag:
+            continue
+
+        value = diag[key]
+
+        if isinstance(value, float):
+            if key == "cobertura_percentual":
+                value = f"{value:.2f}%"
+            else:
+                value = f"{value:.3f}"
+
+        rows.append(
+            {
+                "Métrica": label,
+                "Valor": value,
+            }
+        )
+
+    return pd.DataFrame(rows)
+
+
+def plot_delta_histogram(df: pd.DataFrame, title: str):
+    index_series = pd.to_numeric(df["__INDEX__"], errors="coerce").dropna().sort_values()
+
+    if len(index_series) < 2:
+        return None
+
+    delta_df = pd.DataFrame(
+        {
+            "Delta": index_series.diff().dropna()
+        }
+    )
+
+    fig = px.histogram(
+        delta_df,
+        x="Delta",
+        nbins=60,
+        title=title,
+    )
+
+    fig.update_layout(
+        xaxis_title="Δ índice",
+        yaxis_title="Frequência",
+        height=360,
+    )
+
+    return fig
+
+def format_number_pt(value, decimals=2):
+    if value is None or pd.isna(value):
+        return "-"
+
+    return f"{value:,.{decimals}f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+def format_datetime_pt(value):
+    if value is None:
+        return "-"
+
+    try:
+        dt = pd.to_datetime(value)
+        return dt.strftime("%d/%m/%Y %H:%M:%S")
+    except Exception:
+        return "-"
+
+
+def format_duration_pt(seconds: float | int | None) -> str:
+    if seconds is None or pd.isna(seconds):
+        return "-"
+
+    seconds = int(round(seconds))
+
+    dias = seconds // 86400
+    resto = seconds % 86400
+    horas = resto // 3600
+    resto = resto % 3600
+    minutos = resto // 60
+    segundos = resto % 60
+
+    return f"{dias} dias, {horas} horas, {minutos} minutos e {segundos} segundos"
+
+
+def build_resumo_arquivo_table(item: dict) -> pd.DataFrame:
+    index_type = get_header_value(item, "index_type")
+    total_curvas_configuradas = len(item["metadata_df"])
+    total_curvas_validas = len(item["valid_curves"])
+
+    rows = [
+        {"Informação": "Arquivo", "Valor": get_header_value(item, "file_name") or "-"},
+        {"Informação": "Indexação", "Valor": (index_type or "-").upper()},
+        {
+            "Informação": "Total de registros",
+            "Valor": format_number_pt(get_header_value(item, "total_records"), decimals=0),
+        },
+    ]
+
+    if index_type == "tempo":
+        tempo_min = item.get("tempo_min")
+        tempo_max = item.get("tempo_max")
+
+        if not is_indexed_mode(item) and "__INDEX_DATETIME__" in item["df"].columns:
+            tempo_min = item["df"]["__INDEX_DATETIME__"].min()
+            tempo_max = item["df"]["__INDEX_DATETIME__"].max()
+
+        if tempo_min is None and item.get("index_min") is not None:
+            unidade = item.get("time_unit") or "s"
+            tempo_min = pd.to_datetime(item["index_min"], unit=unidade, utc=True, errors="coerce")
+            tempo_max = pd.to_datetime(item["index_max"], unit=unidade, utc=True, errors="coerce")
+
+        tempo_total_segundos = None
+
+        try:
+            tempo_total_segundos = (
+                pd.to_datetime(tempo_max) - pd.to_datetime(tempo_min)
+            ).total_seconds()
+        except Exception:
+            if item.get("index_min") is not None and item.get("index_max") is not None:
+                tempo_total_segundos = float(item["index_max"]) - float(item["index_min"])
+
+        rows.extend(
+            [
+                {"Informação": "Data inicial", "Valor": format_datetime_pt(tempo_min)},
+                {"Informação": "Data final", "Valor": format_datetime_pt(tempo_max)},
+                {
+                    "Informação": "Tempo total em segundos",
+                    "Valor": format_number_pt(tempo_total_segundos, decimals=0),
+                },
+                {
+                    "Informação": "Diferença em dias",
+                    "Valor": format_duration_pt(tempo_total_segundos),
+                },
+            ]
+        )
+
+    elif index_type == "profundidade":
+        profundidade_min = item.get("index_min")
+        profundidade_max = item.get("index_max")
+
+        if profundidade_min is None or profundidade_max is None:
+            stats_df = item.get("stats_df")
+
+            if stats_df is not None and not stats_df.empty:
+                md_stats = stats_df[stats_df["curve"] == "MD"]
+
+                if not md_stats.empty:
+                    profundidade_min = float(md_stats.iloc[0]["min"])
+                    profundidade_max = float(md_stats.iloc[0]["max"])
+
+        intervalo_profundidade = (
+            profundidade_max - profundidade_min
+            if profundidade_min is not None and profundidade_max is not None
+            else None
+        )
+
+        rows.extend(
+            [
+                {
+                    "Informação": "Profundidade inicial",
+                    "Valor": f"{format_number_pt(profundidade_min)} m",
+                },
+                {
+                    "Informação": "Profundidade final",
+                    "Valor": f"{format_number_pt(profundidade_max)} m",
+                },
+                {
+                    "Informação": "Intervalo de profundidade",
+                    "Valor": f"{format_number_pt(intervalo_profundidade)} m",
+                },
+            ]
+        )
+
+    if item.get("md_min") is not None:
+        rows.extend(
+            [
+                {"Informação": "MD inicial", "Valor": f"{format_number_pt(item.get('md_min'))} m"},
+                {"Informação": "MD final", "Valor": f"{format_number_pt(item.get('md_max'))} m"},
+            ]
+        )
+
+    rows.extend(
+        [
+            {"Informação": "Configuração curvas", "Valor": f"{total_curvas_configuradas} curvas"},
+            {"Informação": "Curvas válidas", "Valor": f"{total_curvas_validas} curvas"},
+        ]
+    )
+
+    resumo_df = pd.DataFrame(rows)
+    resumo_df = resumo_df.astype(str)
+
+    return resumo_df
+
+def safe_display_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    return df.astype(str)
+
+abas = st.tabs(["Resumo", "Gráficos", "Análises entre arquivos"])
 
 # RESUMO
 # Exibe os metadados principais de cada arquivo LAS, a pré-visualização textual
@@ -754,6 +1062,25 @@ with abas[0]:
 
         with col_resumo:
             st.subheader(f"Arquivo {i}: {get_header_value(item, 'file_name')}")
+
+            resumo_arquivo_df = build_resumo_arquivo_table(item)
+
+            index_type = get_header_value(item, "index_type")
+
+            # adiciona espaço para +1 linha quando for tempo
+            if index_type == "tempo":
+                altura_base = 400
+                altura = altura_base + 35  # ~1 linha extra
+            else:
+                altura_base = 335
+                altura = altura_base
+
+            st.dataframe(
+                resumo_arquivo_df,
+                width="stretch",
+                hide_index=True,
+                height=altura,
+            )
 
             col1, col2, col3 = st.columns(3)
             col1.metric("Versão LAS", get_header_value(item, "las_version") or "-")
@@ -1027,10 +1354,199 @@ with abas[1]:
 
 # COMPARACAO ENTRE POCOS
 # Quando dois arquivos são carregados, compara curvas em comum entre eles.
+# Antes da comparação gráfica, executa diagnóstico de qualidade do índice,
+# avaliando cobertura, gaps e regularidade da amostragem.
 with abas[2]:
     if len(datasets) < 2:
         st.info("Envie dois arquivos para comparação.")
     else:
+        # st.subheader("Diagnóstico dos arquivos antes da comparação")
+        # st.write("COBERTURA DOS ARQUIVOS = quantos pontos você TEM / quantos pontos você DEVERIA TER")
+
+        # # df_interpretacao_cobertura = pd.DataFrame(
+        # #     [
+        # #         {"Cobertura (%)": "~ 100%", "Significado": "Amostragem contínua (dados completos)"},
+        # #         {"Cobertura (%)": "95 – 99%", "Significado": "Pequenos gaps (impacto baixo)"},
+        # #         {"Cobertura (%)": "85 – 95%", "Significado": "Gaps moderados (atenção na análise)"},
+        # #         {"Cobertura (%)": "< 85%", "Significado": "Subamostragem forte (pode distorcer comparação)"},
+        # #     ]
+        # # )
+        # df_interpretacao_cobertura = pd.DataFrame(
+        #     [
+        #         {"Cobertura (%)": "~ 100%", "Significado": "Amostragem contínua (dados completos)"},
+        #         {"Cobertura (%)": "95 – 99%", "Significado": "Pequenos gaps (impacto baixo)"},
+        #         {"Cobertura (%)": "85 – 95%", "Significado": "Gaps moderados (atenção na análise)"},
+        #         {"Cobertura (%)": "< 85%", "Significado": "Subamostragem forte (pode distorcer comparação)"},
+        #     ]
+        # )
+
+        # st.dataframe(
+        #     df_interpretacao_cobertura,
+        #     width="stretch",
+        #     hide_index=True
+        # )
+        # st.info(
+        #     "Cobertura representa o quão completa é a série temporal em relação ao esperado. "
+        #     "Valores baixos indicam lacunas (gaps) ou subamostragem."
+        # )
+
+        df_index_1 = load_index_for_quality(datasets[0])
+        df_index_2 = load_index_for_quality(datasets[1])
+
+        index_type_1 = get_header_value(datasets[0], "index_type") or "indeterminado"
+        index_type_2 = get_header_value(datasets[1], "index_type") or "indeterminado"
+
+        # Para arquivos indexados por tempo, assume-se inicialmente 1 segundo.
+        # Para profundidade ou índice indeterminado, usa-se a mediana dos deltas.
+        expected_step_1 = 1.0 if index_type_1 == "tempo" else None
+        expected_step_2 = 1.0 if index_type_2 == "tempo" else None
+
+        diag1 = analyze_index_quality(
+            df=df_index_1,
+            index_type=index_type_1,
+            expected_step=expected_step_1,
+        )
+
+        diag2 = analyze_index_quality(
+            df=df_index_2,
+            index_type=index_type_2,
+            expected_step=expected_step_2,
+        )
+
+        status1, message1 = classify_index_quality(diag1)
+        status2, message2 = classify_index_quality(diag2)
+
+        col_diag_1, col_diag_2 = st.columns(2)
+
+        with col_diag_1:
+            st.markdown(f"### Arquivo 1: {get_header_value(datasets[0], 'file_name') or '-'}")
+
+            if status1 == "success":
+                st.success(message1)
+            elif status1 == "warning":
+                st.warning(message1)
+            else:
+                st.error(message1)
+
+            diag1_df = diagnostic_to_dataframe(diag1)
+            # st.dataframe(diag1_df, width="stretch", hide_index=True)
+            st.dataframe(safe_display_dataframe(diag1_df), width="stretch", hide_index=True)
+
+        with col_diag_2:
+            st.markdown(f"### Arquivo 2: {get_header_value(datasets[1], 'file_name') or '-'}")
+
+            if status2 == "success":
+                st.success(message2)
+            elif status2 == "warning":
+                st.warning(message2)
+            else:
+                st.error(message2)
+
+            diag2_df = diagnostic_to_dataframe(diag2)
+            # st.dataframe(diag2_df, width="stretch", hide_index=True)
+            st.dataframe(safe_display_dataframe(diag2_df), width="stretch", hide_index=True)
+
+        st.markdown("### Distribuição dos deltas do índice")
+
+        col_hist_1, col_hist_2 = st.columns(2)
+
+        with col_hist_1:
+            fig_delta_1 = plot_delta_histogram(
+                df_index_1,
+                title="Arquivo 1 - Distribuição de Δ índice",
+            )
+
+            if fig_delta_1 is not None:
+                st.plotly_chart(fig_delta_1, width="stretch")
+            else:
+                st.info("Arquivo 1 sem pontos suficientes para histograma de Δ.")
+
+        with col_hist_2:
+            fig_delta_2 = plot_delta_histogram(
+                df_index_2,
+                title="Arquivo 2 - Distribuição de Δ índice",
+            )
+
+            if fig_delta_2 is not None:
+                st.plotly_chart(fig_delta_2, width="stretch")
+            else:
+                st.info("Arquivo 2 sem pontos suficientes para histograma de Δ.")
+
+        st.markdown("### Compatibilidade para comparação")
+
+        same_index_type = index_type_1 == index_type_2
+        coverage_1 = diag1.get("cobertura_percentual")
+        coverage_2 = diag2.get("cobertura_percentual")
+
+        if not same_index_type:
+            st.error(
+                "Os arquivos possuem tipos de indexação diferentes. "
+                f"Arquivo 1: `{index_type_1}` | Arquivo 2: `{index_type_2}`. "
+                "A comparação direta pode não ser tecnicamente válida."
+            )
+        elif (
+            coverage_1 is not None
+            and coverage_2 is not None
+            and (coverage_1 < 90 or coverage_2 < 90)
+        ):
+            st.warning(
+                "Pelo menos um dos arquivos possui cobertura inferior a 90%. "
+                "A comparação direta por índice pode distorcer a interpretação. "
+                "Considere reamostragem/interpolação antes da comparação final."
+            )
+        else:
+            st.success(
+                "Os arquivos parecem compatíveis para comparação direta por índice, "
+                "considerando o diagnóstico preliminar."
+            )
+
+        st.divider()
+
+        st.subheader("Diagnóstico de Qualidade dos Arquivos")
+
+        df1_index = load_index_for_quality(datasets[0])
+        df2_index = load_index_for_quality(datasets[1])
+
+        metrics1 = compute_time_metrics(df1_index)
+        metrics2 = compute_time_metrics(df2_index)
+
+        qualidade1 = classify_las_quality(metrics1)
+        qualidade2 = classify_las_quality(metrics2)
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.markdown(f"### Arquivo 1: {get_header_value(datasets[0], 'file_name') or '-'}")
+            # st.success(qualidade1)
+            # st.dataframe(pd.DataFrame(metrics1.items(), columns=["Métrica", "Valor"]), width="stretch")
+            metrics1_df = pd.DataFrame(metrics1.items(), columns=["Métrica", "Valor"])
+            st.dataframe(safe_display_dataframe(metrics1_df), width="stretch")
+
+        with col2:
+            st.markdown(f"### Arquivo 2: {get_header_value(datasets[0], 'file_name') or '-'}")
+            # st.success(qualidade2)
+            # st.dataframe(pd.DataFrame(metrics2.items(), columns=["Métrica", "Valor"]), width="stretch")
+            metrics2_df = pd.DataFrame(metrics2.items(), columns=["Métrica", "Valor"])
+            st.dataframe(safe_display_dataframe(metrics2_df), width="stretch")
+
+        st.divider()
+
+        st.subheader("Comparação entre os arquivos")
+
+        comp = compare_wells_metrics(
+            metrics1,
+            metrics2,
+            datasets[0]["valid_curves"],
+            datasets[1]["valid_curves"],
+        )
+
+        st.dataframe(
+            pd.DataFrame(comp.items(), columns=["Métrica", "Diferença"]),
+            width="stretch",
+        )
+
+        st.subheader("Comparação de curvas em comum")
+
         common_curves = sorted(
             set(datasets[0]["valid_curves"]).intersection(
                 set(datasets[1]["valid_curves"])
@@ -1050,7 +1566,7 @@ with abas[2]:
                     metadata_path=datasets[0].get("metadata_path"),
                 )
             else:
-                df1 = datasets[0]["df"]
+                df1 = datasets[0]["df"][["__INDEX__", curve_name]].copy()
 
             if is_indexed_mode(datasets[1]):
                 df2 = read_selected_curves(
@@ -1060,7 +1576,7 @@ with abas[2]:
                     metadata_path=datasets[1].get("metadata_path"),
                 )
             else:
-                df2 = datasets[1]["df"]
+                df2 = datasets[1]["df"][["__INDEX__", curve_name]].copy()
 
             compare_df = compare_curves_between_wells(
                 df1,
@@ -1069,7 +1585,10 @@ with abas[2]:
             )
 
             if compare_df.empty:
-                st.warning("Não foi possível alinhar índices.")
+                st.warning(
+                    "Não foi possível alinhar índices entre os arquivos. "
+                    "Isso pode ocorrer quando os timestamps/profundidades não coincidem exatamente."
+                )
             else:
                 compare_df = downsample_df(compare_df, max_points=10_000)
 
