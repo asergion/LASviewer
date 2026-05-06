@@ -27,6 +27,9 @@ Caso seja necessário, permite executar scripts locais (como o Activate.ps1)
 # desativa o ambiente virtual
 > deactivate
 
+# atualiza o requirements.txt
+> pip freeze > requirements.txt
+
 ## Ambiente local/servidor
 Configure:
 
@@ -40,6 +43,13 @@ Comportamento:
 - O `.metadata.json` e o `.parquet` são salvos na mesma pasta do LAS.
 - Em "Visualizar LAS indexado", informe somente o caminho do `.metadata.json`.
 - O app localiza automaticamente o `.parquet` na mesma pasta.
+
+## Testes
+### Executar os testes + medir cobertura de código.
+> python -m pytest --cov=src --cov-report=term-missing
+
+### Executar testes com saída detalhada (verbose verbose).
+> python -m pytest -vv 
 
 
 ## Getting started
